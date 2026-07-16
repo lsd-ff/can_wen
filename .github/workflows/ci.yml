@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: canwen
+          POSTGRES_PASSWORD: canwen123
+          POSTGRES_DB: can_wen
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U canwen -d can_wen"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CAN_WEN_DATABASE_URL: postgresql+psycopg://canwen:canwen123@127.0.0.1:5432/can_wen
+      CAN_WEN_AUTH_SECRET_KEY: ci-only-user-secret
+      CAN_WEN_AUTH_DEV_CODE_ENABLED: "true"
+      CANW_ADMIN_DATABASE_URL: postgresql+psycopg://canwen:canwen123@127.0.0.1:5432/can_wen
+      CANW_ADMIN_AUTH_SECRET_KEY: ci-only-admin-secret
+      CANW_ADMIN_ENCRYPTION_KEY: ci-only-admin-encryption-key
+      CANW_ADMIN_AUTO_CREATE_SCHEMA: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify user API
+        working-directory: backend
+        run: |
+          uv sync --dev --frozen
+          uv run alembic upgrade head
+          uv run alembic check
+          uv run pytest -q
+      - name: Verify administrator API
+        working-directory: backend_mger
+        run: |
+          uv sync --dev --frozen
+          uv run alembic upgrade head
+          uv run pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            frontend_mger/package-lock.json
+      - name: Build user frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Build administrator frontend
+        working-directory: frontend_mger
+        run: |
+          npm ci
+          npm run build

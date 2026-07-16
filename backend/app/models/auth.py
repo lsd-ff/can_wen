@@ -101,6 +101,11 @@ class User(Base):
         cascade="all, delete-orphan",
     )
     login_events: Mapped[list[LoginEvent]] = relationship(back_populates="user")
+    settings: Mapped[UserSettings | None] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class UserIdentity(Base):

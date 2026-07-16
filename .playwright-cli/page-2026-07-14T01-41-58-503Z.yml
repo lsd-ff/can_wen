@@ -1,0 +1,146 @@
+- main [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic "CanW" [ref=e6]:
+        - strong [ref=e7]: CanW
+      - button "收起侧边栏" [ref=e8] [cursor=pointer]
+    - navigation "用户端主操作" [ref=e11]:
+      - button [ref=e12] [cursor=pointer]
+      - button [ref=e15] [cursor=pointer]
+      - button [ref=e18] [cursor=pointer]
+      - button [ref=e22] [cursor=pointer]
+      - button [ref=e27] [cursor=pointer]
+      - group "项目" [ref=e31]:
+        - button [ref=e32] [cursor=pointer]
+        - button "收起项目列表" [expanded] [ref=e35] [cursor=pointer]
+        - button "新建项目" [ref=e38] [cursor=pointer]
+    - button [ref=e41] [cursor=pointer]
+  - article [ref=e70]:
+    - generic [ref=e71]:
+      - generic [ref=e72]:
+        - text: CanW Community
+        - heading "家蚕交流社区" [level=1] [ref=e73]
+        - paragraph [ref=e74]: 交流观察、记录处理过程，沉淀可复核的养殖经验。
+      - generic [ref=e75]:
+        - button "我的主页" [ref=e182] [cursor=pointer]
+        - button "收藏夹" [ref=e187] [cursor=pointer]
+        - status "社区消息实时同步中" [ref=e191]:
+          - generic [ref=e78]: 实时
+        - button "社区私信" [ref=e79] [cursor=pointer]
+        - button "社区通知" [ref=e82] [cursor=pointer]
+        - button "发布帖子" [active] [ref=e86] [cursor=pointer]
+    - region "社区内容筛选" [ref=e89]:
+      - tablist [ref=e90]:
+        - tab "推荐" [selected] [ref=e91] [cursor=pointer]
+        - tab "关注" [ref=e92] [cursor=pointer]
+        - tab "话题关注" [ref=e93] [cursor=pointer]
+        - tab "最新" [ref=e94] [cursor=pointer]
+        - tab "收藏" [ref=e95] [cursor=pointer]
+        - tab "赞过" [ref=e96] [cursor=pointer]
+        - tab "浏览记录" [ref=e97] [cursor=pointer]
+        - tab "我的发布" [ref=e98] [cursor=pointer]
+        - tab "草稿" [ref=e99] [cursor=pointer]
+      - textbox "搜索帖子、经验或症状" [ref=e104]
+    - region "内容类型筛选" [ref=e105]:
+      - generic [ref=e106]:
+        - button "全部内容" [ref=e107] [cursor=pointer]
+        - button "病例" [ref=e108] [cursor=pointer]
+        - button "问答" [ref=e109] [cursor=pointer]
+        - button "经验" [ref=e110] [cursor=pointer]
+        - button "资料" [ref=e111] [cursor=pointer]
+      - textbox [ref=e116]:
+        - /placeholder: 按地区筛选
+    - generic [ref=e117]:
+      - button "打开帖子：你好" [ref=e193] [cursor=pointer]:
+        - generic [ref=e196]:
+          - strong [ref=e197]: 西瓜大王
+          - generic [ref=e198]: 3 天前 · 病例交流
+        - generic [ref=e199]:
+          - heading "你好" [level=2] [ref=e200]
+          - paragraph [ref=e201]: 问诊经验整理 观察与问题 你好 建议与处理方向 你好！很高兴为你提供初步问诊与处置建议。为了尽快锁定问题并给出可执行的措施，请你提供以下信息；在未确认前，我会给出谨慎的处理步骤和风险提醒。 初步判断（供参考，暂不能确诊） 目前尚未掌握足够的症状信息，无法确定具体病因。根据养蚕常见情况，可能涉及传染性病害、环境因素引发的问题，或两者的综合影响。需要你补充详细症
+        - generic [ref=e202]: 社区近期互动较多
+        - generic [ref=e207]:
+          - button "1" [ref=e208]
+          - button "1" [ref=e212]
+          - button "1" [ref=e216]
+      - complementary [ref=e126]:
+        - generic [ref=e127]:
+          - generic [ref=e128]:
+            - generic [ref=e129]: 热门话题
+            - generic [ref=e130]: 持续更新
+          - generic [ref=e131]:
+            - generic [ref=e220]:
+              - button "#community-flow-ventilation 5" [ref=e221] [cursor=pointer]:
+                - generic [ref=e222]: "#community-flow-ventilation"
+                - generic [ref=e223]: "5"
+              - button "关注" [ref=e224] [cursor=pointer]
+            - generic [ref=e225]:
+              - button "#feeding 5" [ref=e226] [cursor=pointer]:
+                - generic [ref=e227]: "#feeding"
+                - generic [ref=e228]: "5"
+              - button "关注" [ref=e229] [cursor=pointer]
+            - generic [ref=e230]:
+              - button "#???? 1" [ref=e231] [cursor=pointer]:
+                - generic [ref=e232]: "#????"
+                - generic [ref=e233]: "1"
+              - button "关注" [ref=e234] [cursor=pointer]
+            - generic [ref=e235]:
+              - button "#问诊经验整理 1" [ref=e236] [cursor=pointer]:
+                - generic [ref=e237]: "#问诊经验整理"
+                - generic [ref=e238]: "1"
+              - button "关注" [ref=e239] [cursor=pointer]
+        - generic [ref=e240]:
+          - generic [ref=e241]:
+            - generic [ref=e242]: 我的社区
+            - generic [ref=e243]: 近 7 天发布 0 条
+          - generic [ref=e244]:
+            - button [ref=e245] [cursor=pointer]:
+              - strong [ref=e246]: "0"
+              - text: 粉丝
+            - button [ref=e247] [cursor=pointer]:
+              - strong [ref=e248]: "0"
+              - text: 关注
+            - generic [ref=e249]:
+              - strong [ref=e250]: "0"
+              - text: 获赞
+            - generic [ref=e251]:
+              - strong [ref=e252]: "0"
+              - text: 浏览
+        - generic [ref=e133]:
+          - generic [ref=e137]:
+            - strong [ref=e138]: 经验交流
+            - generic [ref=e139]: 发布前请移除联系方式、地址与其他敏感信息。
+          - button "重置推荐" [ref=e140] [cursor=pointer]
+    - dialog [ref=e253]:
+      - generic [ref=e254]:
+        - generic [ref=e255]:
+          - text: 社区发布
+          - heading "发布新帖子" [level=2] [ref=e256]
+        - button "关闭发布窗口" [ref=e257] [cursor=pointer]
+      - generic [ref=e261]:
+        - generic [ref=e262]: 标题
+        - textbox "标题" [ref=e263]:
+          - /placeholder: 用一句话说清楚你的观察或问题
+      - textbox "补充症状、养殖环境、已采取的措施和结果。" [ref=e264]
+      - generic [ref=e265]:
+        - generic [ref=e266]:
+          - generic [ref=e267]: 内容类型
+          - combobox "内容类型" [ref=e268]:
+            - option "经验分享" [selected]
+            - option "病例交流"
+            - option "提问求助"
+            - option "资料解读"
+        - generic [ref=e269]:
+          - generic [ref=e270]: 可见范围
+          - combobox "可见范围" [ref=e271]:
+            - option "公开社区" [selected]
+            - option "仅关注者"
+        - generic [ref=e272]:
+          - generic [ref=e273]: 话题
+          - textbox "话题" [ref=e274]:
+            - /placeholder: 如 白僵病 湿度
+      - button "添加图片、视频或文档" [ref=e276] [cursor=pointer]
+      - generic [ref=e280]:
+        - button "取消" [ref=e281] [cursor=pointer]
+        - button "保存草稿" [ref=e282] [cursor=pointer]
+        - button "发布帖子" [ref=e283] [cursor=pointer]

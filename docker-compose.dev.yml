@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: canw-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-canwen}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-canwen123}
+      POSTGRES_DB: ${POSTGRES_DB:-can_wen}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - canw-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+volumes:
+  canw-postgres-data:

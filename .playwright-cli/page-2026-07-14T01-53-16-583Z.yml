@@ -1,0 +1,173 @@
+- main [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic "CanW" [ref=e6]:
+        - strong [ref=e7]: CanW
+      - button "收起侧边栏" [ref=e8] [cursor=pointer]
+    - navigation "用户端主操作" [ref=e11]:
+      - button [ref=e12] [cursor=pointer]
+      - button [ref=e15] [cursor=pointer]
+      - button [ref=e18] [cursor=pointer]
+      - button [ref=e22] [cursor=pointer]
+      - button [ref=e27] [cursor=pointer]
+      - group "项目" [ref=e31]:
+        - button [ref=e32] [cursor=pointer]
+        - button "收起项目列表" [expanded] [ref=e35] [cursor=pointer]
+        - button "新建项目" [ref=e38] [cursor=pointer]
+    - button [ref=e41] [cursor=pointer]
+  - article [ref=e377]:
+    - generic [ref=e378]:
+      - generic [ref=e379]:
+        - text: CanW Community
+        - heading "家蚕交流社区" [level=1] [ref=e380]
+        - paragraph [ref=e381]: 交流观察、记录处理过程，沉淀可复核的养殖经验。
+      - generic [ref=e382]:
+        - button "我的主页" [ref=e383] [cursor=pointer]
+        - button "收藏夹" [ref=e388] [cursor=pointer]
+        - status "社区消息实时同步中" [ref=e392]:
+          - generic [ref=e394]: 实时
+        - button "社区私信" [ref=e395] [cursor=pointer]
+        - button "社区通知" [ref=e398] [cursor=pointer]
+        - button "发布帖子" [ref=e402] [cursor=pointer]
+    - region "社区内容筛选" [ref=e405]:
+      - tablist [ref=e406]:
+        - tab "推荐" [selected] [ref=e407] [cursor=pointer]
+        - tab "关注" [ref=e408] [cursor=pointer]
+        - tab "话题关注" [ref=e409] [cursor=pointer]
+        - tab "最新" [ref=e410] [cursor=pointer]
+        - tab "收藏" [ref=e411] [cursor=pointer]
+        - tab "赞过" [ref=e412] [cursor=pointer]
+        - tab "浏览记录" [ref=e413] [cursor=pointer]
+        - tab "我的发布" [ref=e414] [cursor=pointer]
+        - tab "草稿" [ref=e415] [cursor=pointer]
+      - textbox "搜索帖子、经验或症状" [ref=e420]
+    - region "内容类型筛选" [ref=e421]:
+      - generic [ref=e422]:
+        - button "全部内容" [ref=e423] [cursor=pointer]
+        - button "病例" [ref=e424] [cursor=pointer]
+        - button "问答" [ref=e425] [cursor=pointer]
+        - button "经验" [ref=e426] [cursor=pointer]
+        - button "资料" [ref=e427] [cursor=pointer]
+      - textbox [ref=e432]:
+        - /placeholder: 按地区筛选
+    - generic [ref=e433]:
+      - generic [ref=e435]:
+        - button "打开帖子：你好" [ref=e436] [cursor=pointer]:
+          - generic [ref=e439]:
+            - strong [ref=e440]: 西瓜大王
+            - generic [ref=e441]: 3 天前 · 病例交流
+          - generic [ref=e442]:
+            - heading "你好" [level=2] [ref=e443]
+            - paragraph [ref=e444]: 问诊经验整理 观察与问题 你好 建议与处理方向 你好！很高兴为你提供初步问诊与处置建议。为了尽快锁定问题并给出可执行的措施，请你提供以下信息；在未确认前，我会给出谨慎的处理步骤和风险提醒。 初步判断（供参考，暂不能确诊） 目前尚未掌握足够的症状信息，无法确定具体病因。根据养蚕常见情况，可能涉及传染性病害、环境因素引发的问题，或两者的综合影响。需要你补充详细症
+          - generic [ref=e445]: 社区近期互动较多
+          - generic [ref=e450]:
+            - button "1" [ref=e451]
+            - button "1" [ref=e455]
+            - button "1" [ref=e459]
+        - button "打开帖子：浏览器验收：通风记录" [active] [ref=e463] [cursor=pointer]:
+          - generic [ref=e465]:
+            - generic [ref=e466]: CO
+            - generic [ref=e467]:
+              - strong [ref=e468]: community-e2e
+              - generic [ref=e469]: 7 分钟前 · 经验分享
+          - generic [ref=e470]:
+            - heading "浏览器验收：通风记录" [level=2] [ref=e471]
+            - paragraph [ref=e472]: 记录一次通风调整后的观察结果，用于验证社区发布和实时刷新。
+          - generic [ref=e478]:
+            - generic [ref=e479]: "#浏览器验收"
+            - generic [ref=e480]: "#通风"
+          - generic [ref=e481]:
+            - button "1" [pressed] [ref=e551]
+            - button "0" [ref=e486]
+            - button "0" [ref=e490]
+      - complementary [ref=e494]:
+        - generic [ref=e495]:
+          - generic [ref=e496]:
+            - generic [ref=e497]: 热门话题
+            - generic [ref=e498]: 持续更新
+          - generic [ref=e499]:
+            - generic [ref=e500]:
+              - button "#community-flow-ventilation 5" [ref=e501] [cursor=pointer]:
+                - generic [ref=e502]: "#community-flow-ventilation"
+                - generic [ref=e503]: "5"
+              - button "关注" [ref=e504] [cursor=pointer]
+            - generic [ref=e505]:
+              - button "#feeding 5" [ref=e506] [cursor=pointer]:
+                - generic [ref=e507]: "#feeding"
+                - generic [ref=e508]: "5"
+              - button "关注" [ref=e509] [cursor=pointer]
+            - generic [ref=e510]:
+              - button "#???? 1" [ref=e511] [cursor=pointer]:
+                - generic [ref=e512]: "#????"
+                - generic [ref=e513]: "1"
+              - button "关注" [ref=e514] [cursor=pointer]
+            - generic [ref=e515]:
+              - button "#浏览器验收 1" [ref=e516] [cursor=pointer]:
+                - generic [ref=e517]: "#浏览器验收"
+                - generic [ref=e518]: "1"
+              - button "关注" [ref=e519] [cursor=pointer]
+            - generic [ref=e520]:
+              - button "#通风 1" [ref=e521] [cursor=pointer]:
+                - generic [ref=e522]: "#通风"
+                - generic [ref=e523]: "1"
+              - button "关注" [ref=e524] [cursor=pointer]
+            - generic [ref=e525]:
+              - button "#问诊经验整理 1" [ref=e526] [cursor=pointer]:
+                - generic [ref=e527]: "#问诊经验整理"
+                - generic [ref=e528]: "1"
+              - button "关注" [ref=e529] [cursor=pointer]
+        - generic [ref=e530]:
+          - generic [ref=e531]:
+            - generic [ref=e532]: 我的社区
+            - generic [ref=e533]: 近 7 天发布 1 条
+          - generic [ref=e534]:
+            - button [ref=e535] [cursor=pointer]:
+              - strong [ref=e536]: "0"
+              - text: 粉丝
+            - button [ref=e537] [cursor=pointer]:
+              - strong [ref=e538]: "0"
+              - text: 关注
+            - generic [ref=e539]:
+              - strong [ref=e540]: "0"
+              - text: 获赞
+            - generic [ref=e541]:
+              - strong [ref=e542]: "0"
+              - text: 浏览
+        - generic [ref=e543]:
+          - generic [ref=e547]:
+            - strong [ref=e548]: 经验交流
+            - generic [ref=e549]: 发布前请移除联系方式、地址与其他敏感信息。
+          - button "重置推荐" [ref=e550] [cursor=pointer]
+    - dialog [ref=e552]:
+      - generic [ref=e553]:
+        - generic [ref=e554]: 社区帖子
+        - button "关闭帖子" [ref=e555] [cursor=pointer]
+      - generic [ref=e559]:
+        - article [ref=e560]:
+          - button "CO community-e2e 7 分钟前 · 经验分享" [ref=e562] [cursor=pointer]:
+            - generic [ref=e563]: CO
+            - generic [ref=e564]:
+              - strong [ref=e565]: community-e2e
+              - generic [ref=e566]: 7 分钟前 · 经验分享
+          - heading "浏览器验收：通风记录" [level=1] [ref=e567]
+          - paragraph [ref=e569]: 记录一次通风调整后的观察结果，用于验证社区发布和实时刷新。
+          - generic [ref=e570]:
+            - generic [ref=e571]: "#浏览器验收"
+            - generic [ref=e572]: "#通风"
+          - generic [ref=e573]:
+            - button "1" [ref=e574] [cursor=pointer]
+            - button "0" [ref=e577] [cursor=pointer]
+            - button "归入收藏夹" [ref=e580] [cursor=pointer]
+            - button "分享" [ref=e583] [cursor=pointer]
+            - button "编辑" [ref=e587] [cursor=pointer]
+            - button "删除" [ref=e591] [cursor=pointer]
+        - generic [ref=e595]:
+          - generic [ref=e596]:
+            - heading "评论 0" [level=2] [ref=e597]
+            - tablist "评论排序" [ref=e598]:
+              - tab "最热" [selected] [ref=e599] [cursor=pointer]
+              - tab "最新" [ref=e600] [cursor=pointer]
+          - generic [ref=e601]: 还没有评论，说说你的经验或问题。
+      - generic [ref=e602]:
+        - textbox "写下你的评论" [ref=e603]
+        - button "发布评论" [disabled] [ref=e604]
