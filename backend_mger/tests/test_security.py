@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.security import (
     _totp_code,
@@ -99,7 +99,12 @@ def test_risk_action_and_rules_validation() -> None:
 def test_health_settings_validate_probe_and_maintenance_contract() -> None:
     _validate_health_settings({
         "probes": {"user_api_url": "http://127.0.0.1:8010/healthz", "object_storage_url": "https://storage.example.com/healthz", "timeout_seconds": 3},
-        "maintenance": {"enabled": True, "services": ["object_storage"], "ends_at": "2026-07-16T00:00:00+00:00", "message": "存储供应商例行升级"},
+        "maintenance": {
+            "enabled": True,
+            "services": ["object_storage"],
+            "ends_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            "message": "存储供应商例行升级",
+        },
     })
 
 
