@@ -1,0 +1,32 @@
+- main [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic "CanW" [ref=e6]:
+        - strong [ref=e7]: CanW
+      - button "收起侧边栏" [ref=e8] [cursor=pointer]
+    - navigation "用户端主操作" [ref=e11]:
+      - button [ref=e12] [cursor=pointer]
+      - button [ref=e15] [cursor=pointer]
+      - button [ref=e18] [cursor=pointer]
+      - button [ref=e22] [cursor=pointer]
+      - button [ref=e27] [cursor=pointer]
+      - group "项目" [ref=e31]:
+        - button [ref=e32] [cursor=pointer]
+        - button "收起项目列表" [expanded] [ref=e35] [cursor=pointer]
+        - button "新建项目" [ref=e38] [cursor=pointer]
+    - button [ref=e41] [cursor=pointer]
+  - region "新问诊" [ref=e45]:
+    - button "展开新问诊页面" [ref=e46] [cursor=pointer]
+    - generic [ref=e48]:
+      - heading "我们先从哪里开始呢?" [level=1] [ref=e49]
+      - generic [ref=e50]:
+        - textbox "输入问诊问题" [ref=e51]:
+          - /placeholder: 描述症状、上传视频，或继续追问
+        - generic [ref=e52]:
+          - generic [ref=e53]:
+            - button "添加内容" [ref=e54] [cursor=pointer]
+            - button "上传视频" [ref=e56] [cursor=pointer]
+            - button "语音输入" [ref=e60] [cursor=pointer]
+          - generic [ref=e64]:
+            - generic "请先在设置中配置模型" [ref=e65]: 未配置模型
+            - button "发送" [disabled] [ref=e66]

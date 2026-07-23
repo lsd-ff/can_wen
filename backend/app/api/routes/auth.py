@@ -1,8 +1,9 @@
 from ipaddress import ip_address
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.schemas.auth import (
     AuthUserResponse,
@@ -27,11 +28,13 @@ from app.services.auth_service import (
     refresh_access_token,
     request_email_verification_code,
     request_phone_verification_code,
+    upload_current_user_avatar,
     update_current_user_profile,
 )
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+settings = get_settings()
 
 
 @router.post("/email/verification-codes", response_model=EmailVerificationCodeResponse)
@@ -143,7 +146,25 @@ def update_user_profile(
         access_token=_bearer_token(request),
         display_name=payload.display_name,
         username=payload.username,
-        avatar_url=payload.avatar_url,
+    )
+
+
+@router.post("/me/avatar", response_model=AuthUserResponse)
+async def upload_user_avatar(
+    request: Request,
+    avatar: UploadFile = File(...),
+    db: Session = Depends(get_db_session),
+) -> AuthUserResponse:
+    access_token = _bearer_token(request)
+    content = await avatar.read(settings.avatar_upload_max_bytes + 1)
+    if len(content) > settings.avatar_upload_max_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="头像图片不能超过 2MB")
+
+    return upload_current_user_avatar(
+        db,
+        access_token=access_token,
+        content=content,
+        content_type=avatar.content_type,
     )
 
 

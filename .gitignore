@@ -12,14 +12,24 @@ dist
 dist-ssr
 .vite
 *.local
+.env
+.env.*
+!.env.example
 
 # Python cache/test artifacts
+.venv/
+.venv-*/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
 htmlcov/
 .coverage
+backend_mger/var/
+
+# Local browser verification artifacts
+.playwright-cli/
+output/
 
 # Editor directories and files
 .vscode/*

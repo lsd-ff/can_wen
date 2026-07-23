@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class EmailVerificationCodeRequest(BaseModel):
@@ -43,15 +43,17 @@ class AuthUserResponse(BaseModel):
     id: str
     display_name: str
     username: str
+    role: str
     email: str = ""
     phone_number: str = ""
     avatar_url: str | None = None
 
 
 class UpdateUserProfileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     display_name: str = Field(min_length=1, max_length=64)
     username: str = Field(min_length=1, max_length=32)
-    avatar_url: str | None = Field(default=None, max_length=700_000)
 
 
 class EmailLoginResponse(BaseModel):

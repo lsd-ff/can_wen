@@ -1,0 +1,17 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]: CanW 管理工作台
+    - text: SILKWORM OPERATIONS CONSOLE
+    - heading "进入管理工作台" [level=1] [ref=e10]
+    - paragraph [ref=e11]: 仅限受邀的 CanW 平台运营、审核和专家人员使用。
+    - generic [ref=e12]:
+      - generic [ref=e13]:
+        - text: 管理员邮箱
+        - textbox "管理员邮箱" [active] [ref=e14]:
+          - /placeholder: admin@example.com
+      - generic [ref=e15]:
+        - text: 密码
+        - textbox "密码" [ref=e16]:
+          - /placeholder: 至少 12 位
+      - button "继续验证" [ref=e17] [cursor=pointer]
+    - button "使用邀请令牌激活账号" [ref=e18] [cursor=pointer]

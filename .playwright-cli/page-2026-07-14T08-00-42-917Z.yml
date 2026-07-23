@@ -1,0 +1,72 @@
+- main [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic "CanW" [ref=e6]:
+        - strong [ref=e7]: CanW
+      - button "收起侧边栏" [ref=e8] [cursor=pointer]
+    - navigation "用户端主操作" [ref=e11]:
+      - button [ref=e12] [cursor=pointer]
+      - button [ref=e15] [cursor=pointer]
+      - button [ref=e18] [cursor=pointer]
+      - button [ref=e22] [cursor=pointer]
+      - button [ref=e27] [cursor=pointer]
+      - group "项目" [ref=e31]:
+        - button [ref=e32] [cursor=pointer]
+        - button "收起项目列表" [expanded] [ref=e35] [cursor=pointer]
+        - button "新建项目" [ref=e38] [cursor=pointer]
+    - button [ref=e41] [cursor=pointer]
+  - article [ref=e70]:
+    - generic [ref=e71]:
+      - generic [ref=e72]:
+        - text: CanW Community
+        - heading "家蚕交流社区" [level=1] [ref=e73]
+        - paragraph [ref=e74]: 交流观察、记录处理过程，沉淀可复核的养殖经验。
+      - generic [ref=e75]:
+        - status "实时服务暂不可用，正在使用低频同步" [ref=e76]:
+          - generic [ref=e78]: 稍后同步
+        - button "社区私信" [ref=e79] [cursor=pointer]
+        - button "社区通知" [ref=e82] [cursor=pointer]
+        - button "发布帖子" [ref=e86] [cursor=pointer]
+    - region "社区内容筛选" [ref=e89]:
+      - tablist [ref=e90]:
+        - tab "推荐" [selected] [ref=e91] [cursor=pointer]
+        - tab "关注" [ref=e92] [cursor=pointer]
+        - tab "话题关注" [ref=e93] [cursor=pointer]
+        - tab "最新" [ref=e94] [cursor=pointer]
+        - tab "收藏" [ref=e95] [cursor=pointer]
+        - tab "赞过" [ref=e96] [cursor=pointer]
+        - tab "浏览记录" [ref=e97] [cursor=pointer]
+        - tab "我的发布" [ref=e98] [cursor=pointer]
+        - tab "草稿" [ref=e99] [cursor=pointer]
+      - textbox "搜索帖子、经验或症状" [ref=e104]
+    - region "内容类型筛选" [ref=e105]:
+      - generic [ref=e106]:
+        - button "全部内容" [ref=e107] [cursor=pointer]
+        - button "病例" [ref=e108] [cursor=pointer]
+        - button "问答" [ref=e109] [cursor=pointer]
+        - button "经验" [ref=e110] [cursor=pointer]
+        - button "资料" [ref=e111] [cursor=pointer]
+      - textbox [ref=e116]:
+        - /placeholder: 按地区筛选
+    - generic [ref=e117]:
+      - generic [ref=e119]:
+        - strong [ref=e122]: 这里还没有内容
+        - generic [ref=e123]: 分享一次观察或处理过程，帮助更多养殖者。
+        - button "发布帖子" [ref=e124] [cursor=pointer]
+      - complementary [ref=e126]:
+        - generic [ref=e127]:
+          - generic [ref=e128]:
+            - generic [ref=e129]: 热门话题
+            - generic [ref=e130]: 持续更新
+          - generic [ref=e131]: 发布内容后会出现话题
+        - generic [ref=e133]:
+          - generic [ref=e137]:
+            - strong [ref=e138]: 经验交流
+            - generic [ref=e139]: 发布前请移除联系方式、地址与其他敏感信息。
+          - button "重置推荐" [active] [ref=e140] [cursor=pointer]
+    - dialog [ref=e141]:
+      - heading "重置推荐偏好？" [level=2] [ref=e142]
+      - paragraph [ref=e143]: 会恢复“不感兴趣”的内容并清除浏览偏好；点赞、收藏和关注不会受到影响。
+      - generic [ref=e144]:
+        - button "取消" [ref=e145] [cursor=pointer]
+        - button "重置" [ref=e146] [cursor=pointer]

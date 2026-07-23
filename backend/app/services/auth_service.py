@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 from uuid import UUID
+from uuid import uuid4
 
 from fastapi import HTTPException, status
 from sqlalchemy import desc, func, select
@@ -30,13 +31,18 @@ from app.schemas.auth import (
 )
 from app.services.email_delivery import send_login_code_email, smtp_is_configured
 from app.services.sms_delivery import send_login_code_sms, sms_is_configured
+from app.services.storage_service import upload_public_file
 
 
 settings = get_settings()
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
-AVATAR_URL_PREFIXES = ("data:image/", "http://", "https://")
+AVATAR_CONTENT_TYPES = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+}
 
 
 def request_email_verification_code(
@@ -287,13 +293,26 @@ def get_current_user_profile(db: Session, *, access_token: str) -> AuthUserRespo
     return _auth_user_response(db, user)
 
 
+def get_current_user(db: Session, *, access_token: str) -> User:
+    session = _get_active_session_from_access_token(db, access_token)
+    user = session.user
+    _ensure_active_user(user)
+
+    return user
+
+
+def get_current_auth_session(db: Session, *, access_token: str) -> AuthSession:
+    session = _get_active_session_from_access_token(db, access_token)
+    _ensure_active_user(session.user)
+    return session
+
+
 def update_current_user_profile(
     db: Session,
     *,
     access_token: str,
     display_name: str,
     username: str,
-    avatar_url: str | None,
 ) -> AuthUserResponse:
     normalized_display_name = display_name.strip()
     if not normalized_display_name:
@@ -305,10 +324,6 @@ def update_current_user_profile(
     if not USERNAME_PATTERN.fullmatch(normalized_username):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户名只能包含字母、数字、下划线、点和短横线")
 
-    normalized_avatar_url = avatar_url.strip() if avatar_url else None
-    if normalized_avatar_url and not normalized_avatar_url.startswith(AVATAR_URL_PREFIXES):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="头像格式不正确")
-
     session = _get_active_session_from_access_token(db, access_token)
     user = session.user
     _ensure_active_user(user)
@@ -316,13 +331,64 @@ def update_current_user_profile(
     current_time = now_utc()
     user.display_name = normalized_display_name
     user.username = normalized_username
-    user.avatar_url = normalized_avatar_url
     user.updated_at = current_time
     session.last_used_at = current_time
     db.commit()
     db.refresh(user)
 
     return _auth_user_response(db, user)
+
+
+def upload_current_user_avatar(
+    db: Session,
+    *,
+    access_token: str,
+    content: bytes,
+    content_type: str | None,
+) -> AuthUserResponse:
+    normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    extension = AVATAR_CONTENT_TYPES.get(normalized_content_type)
+    if extension is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="头像只支持 JPG、PNG 或 WebP 图片")
+
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="头像图片不能为空")
+
+    if len(content) > settings.avatar_upload_max_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="头像图片不能超过 2MB")
+
+    if not _has_supported_image_signature(content, normalized_content_type):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="头像图片格式不正确")
+
+    session = _get_active_session_from_access_token(db, access_token)
+    user = session.user
+    _ensure_active_user(user)
+
+    object_key = f"avatars/{user.id}/{uuid4().hex}.{extension}"
+    avatar_url = upload_public_file(
+        object_key=object_key,
+        content=content,
+        content_type=normalized_content_type,
+    )
+
+    current_time = now_utc()
+    user.avatar_url = avatar_url
+    user.updated_at = current_time
+    session.last_used_at = current_time
+    db.commit()
+    db.refresh(user)
+
+    return _auth_user_response(db, user)
+
+
+def _has_supported_image_signature(content: bytes, content_type: str) -> bool:
+    if content_type == "image/jpeg":
+        return content.startswith(b"\xff\xd8\xff")
+    if content_type == "image/png":
+        return content.startswith(b"\x89PNG\r\n\x1a\n")
+    if content_type == "image/webp":
+        return len(content) >= 12 and content.startswith(b"RIFF") and content[8:12] == b"WEBP"
+    return False
 
 
 def normalize_supported_email(email: str) -> str:
@@ -669,6 +735,7 @@ def _auth_user_response(db: Session, user: User) -> AuthUserResponse:
         id=str(user.id),
         display_name=user.display_name,
         username=user.username,
+        role=user.role,
         email=_primary_email_for_user(db, user.id),
         phone_number=_primary_phone_for_user(db, user.id),
         avatar_url=user.avatar_url,
