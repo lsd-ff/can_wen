@@ -10,24 +10,11 @@ DiagnosisMessageFeedback = Literal["like", "dislike"]
 DiagnosisConversationShareVariant = Literal["summary", "full-record", "expert-review"]
 
 
-class DiagnosisChatMessage(BaseModel):
+class DiagnosisContextMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     role: Literal["user", "assistant"]
     content: str = Field(min_length=1, max_length=4000)
-
-
-class DiagnosisChatRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    message: str = Field(min_length=1, max_length=4000)
-    history: list[DiagnosisChatMessage] = Field(default_factory=list, max_length=20)
-
-
-class DiagnosisChatResponse(BaseModel):
-    reply: str
-    model: str
-    provider: str = "openai-compatible"
 
 
 class DiagnosisVoiceTranscriptionResponse(BaseModel):
@@ -151,6 +138,47 @@ class DiagnosisFileResponse(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class DiagnosisAgentEventResponse(BaseModel):
+    run_id: str
+    sequence: int
+    agent: str
+    stage: str
+    status: Literal["started", "progress", "completed", "waiting", "degraded", "failed"]
+    title: str
+    summary: str | None = None
+    payload: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class DiagnosisCitationResponse(BaseModel):
+    evidence_id: str
+    title: str
+    source_name: str | None = None
+    source_uri: str | None = None
+    source_version: str | None = None
+    source_page: str | None = None
+    retrievers: list[str] = Field(default_factory=list)
+    score: float | None = None
+    excerpt: str = ""
+
+
+class DiagnosisAgentRunResponse(BaseModel):
+    id: str
+    status: Literal["queued", "running", "waiting_for_user", "completed", "degraded", "failed", "cancelled"]
+    route: Literal["rag", "kg", "hybrid", "clarify", "out_of_domain", "non_knowledge"] | None = None
+    risk_level: Literal["low", "medium", "high", "critical"] | None = None
+    original_question: str
+    rewritten_question: str | None = None
+    evidence_status: Literal["sufficient", "insufficient", "conflicted", "not_required"] | None = None
+    missing_slots: list[str] = Field(default_factory=list)
+    metrics: dict = Field(default_factory=dict)
+    citations: list[DiagnosisCitationResponse] = Field(default_factory=list)
+    events: list[DiagnosisAgentEventResponse] = Field(default_factory=list)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_at: datetime
+
+
 class DiagnosisMessageResponse(BaseModel):
     id: str
     role: DiagnosisMessageRole
@@ -163,6 +191,7 @@ class DiagnosisMessageResponse(BaseModel):
     feedback_reasons: list[str] = Field(default_factory=list)
     feedback_detail: str | None = None
     attachments: list[DiagnosisFileResponse] = Field(default_factory=list)
+    agent_run: DiagnosisAgentRunResponse | None = None
 
 
 class DiagnosisConversationResponse(BaseModel):
@@ -219,6 +248,7 @@ class DiagnosisConversationTurnResponse(BaseModel):
     assistant_message: DiagnosisMessageResponse
     model: str
     provider: str = "openai-compatible"
+    agent_run: DiagnosisAgentRunResponse | None = None
 
 
 class DiagnosisMessageMutationResponse(BaseModel):

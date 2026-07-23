@@ -17,6 +17,16 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8010 --reload
 
 The API will be available at `http://127.0.0.1:8010`.
 
+## Evidence-first diagnosis agents
+
+Authenticated diagnosis conversations use a four-agent LangGraph workflow: context/routing, KG Agentic Query, HNSW+BM25 Agentic Query, and evidence governance/grounded answering. The process is streamed to the frontend with SSE and persisted for replay. The legacy direct-model `/api/v1/diagnosis/chat` endpoint has been removed from the router and OpenAPI contract.
+
+Query-side Qdrant, OpenSearch, Neo4j Aura, embedding and rerank settings are documented in `.env.example`. They must match the management-side publication pipeline. See `docs/diagnosis-agent-architecture.md` for the full design and failure policy.
+
+## Published knowledge graph
+
+Authenticated user clients can explore the real Neo4j graph through the read-only endpoints `GET /api/v1/knowledge/graph` and `GET /api/v1/knowledge/graph/detail`. The API exposes only the approved disease-domain schema and public evidence fields. It includes curated legacy relationships without a publication identifier plus relationships belonging to the management side's current publication snapshot; stale published versions remain hidden.
+
 ## Database
 
 Configure the database connection with:

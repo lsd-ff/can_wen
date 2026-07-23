@@ -20,6 +20,9 @@ from app.models import (
 def test_auth_models_are_registered() -> None:
     assert set(Base.metadata.tables) == {
         "admin.expert_reviews",
+        "agent_evidence",
+        "agent_run_events",
+        "agent_runs",
         "auth_sessions",
         "auth_verification_codes",
         "community_bookmark_collection_items",

@@ -8,7 +8,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import and_, select, text, update
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings

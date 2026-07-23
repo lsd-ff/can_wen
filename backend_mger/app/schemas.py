@@ -1,24 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
-T = TypeVar("T")
-
-
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-class ApiList(BaseModel, Generic[T]):
-    items: list[T]
-    total: int
-    page: int
-    page_size: int
 
 
 class AdminIdentity(BaseModel):
@@ -92,14 +82,6 @@ class RoleUpsertRequest(StrictModel):
     description: str = Field(min_length=3, max_length=500)
     permission_keys: list[str] = Field(min_length=1, max_length=32)
     reason: str = Field(min_length=3, max_length=500)
-
-
-class InviteResponse(BaseModel):
-    id: str
-    email: str
-    role_keys: list[str]
-    expires_at: datetime
-    invitation_token: str | None = None
 
 
 class AcceptInviteRequest(StrictModel):
@@ -213,18 +195,35 @@ class ModelConfigRequest(StrictModel):
     model_id: str = Field(min_length=2, max_length=200)
     api_base_url: str = Field(min_length=8, max_length=500)
     api_key: str | None = Field(default=None, min_length=8, max_length=1000)
-    capability: Literal["chat", "vision", "embedding", "speech"] = "chat"
+    clear_api_key: bool = False
+    capability: Literal["chat", "vision", "embedding", "rerank", "speech"] = "chat"
     enabled: bool = True
     reason: str = Field(min_length=3, max_length=500)
 
 
-class KnowledgeSourceRequest(StrictModel):
-    title: str = Field(min_length=2, max_length=240)
-    source_type: Literal["document", "website", "dataset", "manual"] = "document"
-    source_url: str | None = Field(default=None, max_length=1000)
-    version: str = Field(default="v1", min_length=1, max_length=60)
-    license_note: str | None = Field(default=None, max_length=1000)
-    status: Literal["draft", "processing", "ready", "disabled"] = "draft"
+class KnowledgeBuildRequest(StrictModel):
+    targets: list[Literal["rag", "kg"]] = Field(default_factory=lambda: ["rag", "kg"], min_length=1, max_length=2)
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class KnowledgePublishRequest(StrictModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class KnowledgeReviewDecisionRequest(StrictModel):
+    action: Literal["approve", "reject"]
+    version: int = Field(ge=1)
+    note: str = Field(min_length=3, max_length=2000)
+    corrections: dict[str, Any] = Field(default_factory=dict)
+
+
+class KnowledgeSourceStatusRequest(StrictModel):
+    status: Literal["draft", "disabled"]
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class KnowledgeSourceDeleteRequest(StrictModel):
+    confirmation_title: str = Field(min_length=2, max_length=240)
     reason: str = Field(min_length=3, max_length=500)
 
 

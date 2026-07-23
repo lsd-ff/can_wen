@@ -27,7 +27,7 @@ class ExpertReview(Base):
             unique=True,
             postgresql_where=text("husbandry_case_id IS NOT NULL"),
         ),
-        {"schema": "admin", "comment": "专家对问诊或养殖病例的审核与复核结论。"},
+        {"schema": "admin"},
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))

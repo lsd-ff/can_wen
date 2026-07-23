@@ -7,6 +7,9 @@ from app.models.auth import (
 )
 from app.models.user_settings import UserSettings
 from app.models.p0 import (
+    AgentEvidence,
+    AgentRun,
+    AgentRunEvent,
     Conversation,
     ConversationShare,
     ConversationTag,
@@ -55,6 +58,9 @@ from app.models.admin import ExpertReview
 
 
 __all__ = [
+    "AgentEvidence",
+    "AgentRun",
+    "AgentRunEvent",
     "AuthSession",
     "AuthVerificationCode",
     "LoginEvent",

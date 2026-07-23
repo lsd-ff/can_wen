@@ -1,15 +1,20 @@
 import asyncio
 import json
+import queue
+import threading
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.db.session import get_db_session
+from app.db.session import SessionLocal, get_db_session
+from app.models import AgentRun, User
 from app.schemas.diagnosis import (
-    DiagnosisChatRequest,
-    DiagnosisChatResponse,
+    DiagnosisAgentEventResponse,
+    DiagnosisAgentRunResponse,
     DiagnosisConversationCreateRequest,
     DiagnosisConversationDetailResponse,
     DiagnosisConversationMessageCreateRequest,
@@ -40,7 +45,6 @@ from app.services.diagnosis_service import (
     delete_current_user_diagnosis_draft_attachment,
     delete_current_user_diagnosis_conversation,
     delete_current_user_diagnosis_message,
-    generate_diagnosis_reply,
     get_public_diagnosis_conversation_share,
     get_current_user_diagnosis_conversation,
     list_current_user_archived_diagnosis_conversations,
@@ -56,6 +60,7 @@ from app.services.diagnosis_service import (
     update_current_user_diagnosis_conversation,
     update_current_user_diagnosis_message,
 )
+from app.services.diagnosis_agent_service import get_agent_run_response, list_agent_run_events
 
 
 router = APIRouter(prefix="/diagnosis", tags=["diagnosis"])
@@ -282,6 +287,41 @@ def create_diagnosis_conversation_message(
     )
 
 
+@router.post("/conversations/stream")
+def stream_new_diagnosis_conversation(
+    payload: DiagnosisConversationCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    user = get_current_user(db, access_token=_bearer_token(request))
+    return _stream_plain_turn(
+        user_id=user.id,
+        settings=settings,
+        message=payload.message,
+        project_id=payload.project_id,
+        model_config_id=payload.model_config_id,
+    )
+
+
+@router.post("/conversations/{conversation_id}/messages/stream")
+def stream_diagnosis_conversation_message(
+    conversation_id: UUID,
+    payload: DiagnosisConversationMessageCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    user = get_current_user(db, access_token=_bearer_token(request))
+    return _stream_plain_turn(
+        user_id=user.id,
+        settings=settings,
+        message=payload.message,
+        conversation_id=conversation_id,
+        model_config_id=payload.model_config_id,
+    )
+
+
 @router.post("/transcribe", response_model=DiagnosisVoiceTranscriptionResponse)
 async def transcribe_diagnosis_voice(
     request: Request,
@@ -368,6 +408,123 @@ async def create_multimodal_diagnosis_conversation_message(
     )
 
 
+@router.post("/conversations/multimodal/stream")
+async def stream_new_multimodal_diagnosis_conversation(
+    request: Request,
+    message: str = Form(default=""),
+    model_config_id: UUID | None = Form(default=None),
+    project_id: UUID | None = Form(default=None),
+    structured_data: str | None = Form(default=None),
+    attachment_ids: list[UUID] | None = Form(default=None),
+    attachments: list[UploadFile] | None = File(default=None),
+    db: Session = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    user = get_current_user(db, access_token=_bearer_token(request))
+    prepared = await _prepare_multimodal_uploads(attachments or [], attachment_ids or [], settings)
+    return _stream_multimodal_turn(
+        user_id=user.id,
+        settings=settings,
+        message=message,
+        attachments=prepared,
+        attachment_ids=attachment_ids or [],
+        structured_data=_parse_structured_data(structured_data),
+        project_id=project_id,
+        model_config_id=model_config_id,
+    )
+
+
+@router.post("/conversations/{conversation_id}/messages/multimodal/stream")
+async def stream_multimodal_diagnosis_conversation_message(
+    conversation_id: UUID,
+    request: Request,
+    message: str = Form(default=""),
+    model_config_id: UUID | None = Form(default=None),
+    structured_data: str | None = Form(default=None),
+    attachment_ids: list[UUID] | None = Form(default=None),
+    attachments: list[UploadFile] | None = File(default=None),
+    db: Session = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    user = get_current_user(db, access_token=_bearer_token(request))
+    prepared = await _prepare_multimodal_uploads(attachments or [], attachment_ids or [], settings)
+    return _stream_multimodal_turn(
+        user_id=user.id,
+        settings=settings,
+        message=message,
+        attachments=prepared,
+        attachment_ids=attachment_ids or [],
+        structured_data=_parse_structured_data(structured_data),
+        conversation_id=conversation_id,
+        model_config_id=model_config_id,
+    )
+
+
+@router.get("/agent-runs/{run_id}", response_model=DiagnosisAgentRunResponse)
+def get_diagnosis_agent_run(
+    run_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db_session),
+) -> DiagnosisAgentRunResponse:
+    user = get_current_user(db, access_token=_bearer_token(request))
+    return get_agent_run_response(db, user=user, run_id=run_id)
+
+
+@router.get("/agent-runs/{run_id}/events", response_model=list[DiagnosisAgentEventResponse])
+def get_diagnosis_agent_run_events(
+    run_id: UUID,
+    request: Request,
+    after_sequence: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db_session),
+) -> list[DiagnosisAgentEventResponse]:
+    user = get_current_user(db, access_token=_bearer_token(request))
+    return list_agent_run_events(db, user=user, run_id=run_id, after_sequence=after_sequence)
+
+
+@router.get("/agent-runs/{run_id}/events/stream")
+async def stream_diagnosis_agent_run_events(
+    run_id: UUID,
+    request: Request,
+    after_sequence: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db_session),
+) -> StreamingResponse:
+    user = get_current_user(db, access_token=_bearer_token(request))
+    get_agent_run_response(db, user=user, run_id=run_id)
+    user_id = user.id
+
+    async def event_stream():
+        cursor = after_sequence
+        yield _sse("ready", {"run_id": str(run_id), "after_sequence": cursor})
+        while True:
+            if await request.is_disconnected():
+                break
+            with SessionLocal() as event_db:
+                worker_user = event_db.get(User, user_id)
+                if worker_user is None:
+                    yield _sse("error", {"detail": "用户不存在"})
+                    break
+                events = list_agent_run_events(
+                    event_db,
+                    user=worker_user,
+                    run_id=run_id,
+                    after_sequence=cursor,
+                )
+                run_status = event_db.scalar(select(AgentRun.status).where(AgentRun.id == run_id))
+            for event in events:
+                cursor = event.sequence
+                yield _sse("process", event.model_dump(mode="json"), event_id=str(event.sequence))
+            if run_status in {"waiting_for_user", "completed", "degraded", "failed", "cancelled"}:
+                yield _sse("complete", {"run_id": str(run_id), "status": run_status, "last_sequence": cursor})
+                break
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
 @router.patch("/conversations/{conversation_id}/messages/{message_id}", response_model=DiagnosisMessageMutationResponse)
 def update_diagnosis_conversation_message(
     conversation_id: UUID,
@@ -445,27 +602,23 @@ def regenerate_diagnosis_conversation_message(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
 
 
-@router.post("/chat", response_model=DiagnosisChatResponse)
-async def create_diagnosis_chat(
-    payload: DiagnosisChatRequest,
+@router.post("/conversations/{conversation_id}/messages/{message_id}/regenerate/stream")
+def stream_regenerate_diagnosis_conversation_message(
+    conversation_id: UUID,
+    message_id: UUID,
+    payload: DiagnosisMessageRegenerateRequest,
+    request: Request,
+    db: Session = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
-) -> DiagnosisChatResponse:
-    try:
-        reply = await asyncio.to_thread(
-            generate_diagnosis_reply,
-            settings,
-            message=payload.message,
-            history=payload.history,
-        )
-    except LLMConfigurationError as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="大模型配置未完成，请检查后端环境变量 OPENAI_API_KEY 或 CAN_WEN_OPENAI_API_KEY",
-        ) from error
-    except LLMProviderError as error:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
-
-    return DiagnosisChatResponse(reply=reply, model=settings.openai_model_id)
+) -> StreamingResponse:
+    user = get_current_user(db, access_token=_bearer_token(request))
+    return _stream_regenerate_turn(
+        user_id=user.id,
+        settings=settings,
+        conversation_id=conversation_id,
+        message_id=message_id,
+        model_config_id=payload.model_config_id,
+    )
 
 
 def _create_diagnosis_turn(
@@ -552,6 +705,201 @@ async def _create_multimodal_diagnosis_turn(
         ) from error
     except LLMProviderError as error:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+
+
+async def _prepare_multimodal_uploads(
+    attachments: list[UploadFile],
+    attachment_ids: list[UUID],
+    settings: Settings,
+) -> list[DiagnosisAttachmentUpload]:
+    if len(attachments) + len(attachment_ids) > settings.multimodal_attachment_max_count:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"一次最多上传 {settings.multimodal_attachment_max_count} 个问诊材料",
+        )
+    prepared: list[DiagnosisAttachmentUpload] = []
+    for attachment in attachments:
+        content = await attachment.read(settings.multimodal_attachment_max_bytes + 1)
+        if len(content) > settings.multimodal_attachment_max_bytes:
+            max_mb = max(1, settings.multimodal_attachment_max_bytes // 1024 // 1024)
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"单个问诊材料不能超过 {max_mb}MB",
+            )
+        prepared.append(
+            DiagnosisAttachmentUpload(
+                file_name=attachment.filename or "attachment",
+                content_type=attachment.content_type or "application/octet-stream",
+                content=content,
+            )
+        )
+    return prepared
+
+
+def _stream_plain_turn(
+    *,
+    user_id: UUID,
+    settings: Settings,
+    message: str,
+    conversation_id: UUID | None = None,
+    model_config_id: UUID | None = None,
+    project_id: UUID | None = None,
+) -> StreamingResponse:
+    messages: queue.Queue[tuple[str, dict]] = queue.Queue()
+
+    def on_event(event) -> None:
+        messages.put(("process", event.model_dump(mode="json")))
+
+    def worker() -> None:
+        try:
+            with SessionLocal() as worker_db:
+                user = worker_db.get(User, user_id)
+                if user is None:
+                    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已退出")
+                turn = create_current_user_diagnosis_turn(
+                    worker_db,
+                    user=user,
+                    settings=settings,
+                    message=message,
+                    conversation_id=conversation_id,
+                    model_config_id=model_config_id,
+                    project_id=project_id,
+                    event_callback=on_event,
+                )
+                messages.put(("final", turn.model_dump(mode="json")))
+        except Exception as error:
+            messages.put(("error", _stream_error(error)))
+        finally:
+            messages.put(("done", {}))
+
+    threading.Thread(target=worker, name="diagnosis-agent-stream", daemon=True).start()
+    return _worker_stream_response(messages)
+
+
+def _stream_multimodal_turn(
+    *,
+    user_id: UUID,
+    settings: Settings,
+    message: str,
+    attachments: list[DiagnosisAttachmentUpload],
+    attachment_ids: list[UUID],
+    structured_data: dict,
+    conversation_id: UUID | None = None,
+    model_config_id: UUID | None = None,
+    project_id: UUID | None = None,
+) -> StreamingResponse:
+    messages: queue.Queue[tuple[str, dict]] = queue.Queue()
+
+    def on_event(event) -> None:
+        messages.put(("process", event.model_dump(mode="json")))
+
+    def worker() -> None:
+        try:
+            with SessionLocal() as worker_db:
+                user = worker_db.get(User, user_id)
+                if user is None:
+                    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已退出")
+                turn = create_current_user_multimodal_diagnosis_turn(
+                    worker_db,
+                    user=user,
+                    settings=settings,
+                    message=message,
+                    attachments=attachments,
+                    attachment_ids=attachment_ids,
+                    structured_data=structured_data,
+                    conversation_id=conversation_id,
+                    model_config_id=model_config_id,
+                    project_id=project_id,
+                    event_callback=on_event,
+                )
+                messages.put(("final", turn.model_dump(mode="json")))
+        except Exception as error:
+            messages.put(("error", _stream_error(error)))
+        finally:
+            messages.put(("done", {}))
+
+    threading.Thread(target=worker, name="diagnosis-multimodal-agent-stream", daemon=True).start()
+    return _worker_stream_response(messages)
+
+
+def _stream_regenerate_turn(
+    *,
+    user_id: UUID,
+    settings: Settings,
+    conversation_id: UUID,
+    message_id: UUID,
+    model_config_id: UUID | None = None,
+) -> StreamingResponse:
+    messages: queue.Queue[tuple[str, dict]] = queue.Queue()
+
+    def on_event(event) -> None:
+        messages.put(("process", event.model_dump(mode="json")))
+
+    def worker() -> None:
+        try:
+            with SessionLocal() as worker_db:
+                user = worker_db.get(User, user_id)
+                if user is None:
+                    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已退出")
+                response = regenerate_current_user_diagnosis_message(
+                    worker_db,
+                    user=user,
+                    settings=settings,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    model_config_id=model_config_id,
+                    event_callback=on_event,
+                )
+                messages.put(("final", response.model_dump(mode="json")))
+        except Exception as error:
+            messages.put(("error", _stream_error(error)))
+        finally:
+            messages.put(("done", {}))
+
+    threading.Thread(target=worker, name="diagnosis-regenerate-agent-stream", daemon=True).start()
+    return _worker_stream_response(messages)
+
+
+def _worker_stream_response(messages: queue.Queue[tuple[str, dict]]) -> StreamingResponse:
+    def event_stream():
+        yield _sse("ready", {"pipeline": "agentic_kg_rag", "version": 1})
+        while True:
+            try:
+                event_name, payload = messages.get(timeout=15)
+            except queue.Empty:
+                yield _sse("ping", {})
+                continue
+            if event_name == "done":
+                break
+            event_id = None
+            if event_name == "process" and payload.get("sequence") is not None:
+                event_id = str(payload["sequence"])
+            yield _sse(event_name, payload, event_id=event_id)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+def _sse(event: str, payload: dict, *, event_id: str | None = None) -> str:
+    parts = []
+    if event_id:
+        parts.append(f"id: {event_id}")
+    parts.append(f"event: {event}")
+    parts.append(f"data: {json.dumps(payload, ensure_ascii=False, default=str)}")
+    return "\n".join(parts) + "\n\n"
+
+
+def _stream_error(error: Exception) -> dict:
+    if isinstance(error, HTTPException):
+        return {"status": error.status_code, "detail": str(error.detail)}
+    if isinstance(error, LLMConfigurationError):
+        return {"status": 503, "detail": "大模型配置未完成，请检查模型配置"}
+    if isinstance(error, LLMProviderError):
+        return {"status": 502, "detail": "模型服务暂不可用，请稍后重试"}
+    return {"status": 500, "detail": "智能体流程执行失败，请稍后重试"}
 
 
 def _parse_structured_data(raw_value: str | None) -> dict:

@@ -35,7 +35,7 @@ export type ApiCommunityCaseUpdate = {
   created_at: string;
 };
 
-export type ApiCommunityAsset = {
+type ApiCommunityAsset = {
   id: string;
   file_id: string;
   file_name: string;
@@ -138,7 +138,7 @@ export type ApiCommunityCommentList = {
   next_offset: number | null;
 };
 
-export type ApiCommunityNotification = {
+type ApiCommunityNotification = {
   id: string;
   notification_type: string;
   post_id: string | null;
@@ -160,19 +160,6 @@ export type CommunityRealtimeEvent = {
   post_id?: string | null;
   comment_id?: string | null;
   payload?: Record<string, unknown>;
-};
-
-export type ApiCommunityReport = {
-  id: string;
-  target_type: 'post' | 'comment';
-  post_id: string | null;
-  comment_id: string | null;
-  reason: string;
-  detail: string | null;
-  status: 'pending' | 'reviewed' | 'dismissed';
-  reporter: ApiCommunityAuthor;
-  created_at: string;
-  reviewed_at: string | null;
 };
 
 export type ApiCommunityProfileDetail = {

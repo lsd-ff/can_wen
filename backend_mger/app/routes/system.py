@@ -8,14 +8,14 @@ from uuid import UUID
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
 from app.dependencies import require_permission
-from app.models import AdminAccount, AdminAccountRole, AdminPermission, AdminRole, AdminRolePermission, AuditLog, BackgroundJob, KnowledgeSource, RiskIncident, RiskIncidentActivity, RiskNotificationReceipt, SensitiveAccessGrant, ServiceHealthSnapshot, SystemModelConfig, SystemSetting
-from app.schemas import AdminRoleAssignmentRequest, AssetLifecycleRequest, InviteCreateRequest, JobActionRequest, KnowledgeSourceRequest, ModelConfigRequest, ReasonRequest, RiskIncidentActionRequest, RoleUpsertRequest, SystemSettingRequest, UserStatusRequest
+from app.models import AdminAccount, AdminAccountRole, AdminPermission, AdminRole, AdminRolePermission, BackgroundJob, KnowledgeBuildEvent, KnowledgeBuildRun, KnowledgePublication, KnowledgeSource, KnowledgeSourceVersion, RiskIncident, RiskIncidentActivity, RiskNotificationReceipt, SensitiveAccessGrant, ServiceHealthSnapshot, SystemModelConfig, SystemSetting
+from app.schemas import AdminRoleAssignmentRequest, AssetLifecycleRequest, InviteCreateRequest, JobActionRequest, ModelConfigRequest, ReasonRequest, RiskIncidentActionRequest, RoleUpsertRequest, SystemSettingRequest, UserStatusRequest
 from app.security import decrypt_secret, encrypt_secret, now_utc
 from app.services import AdminActor, DEFAULT_REVIEW_THRESHOLDS, PERMISSIONS, create_invite, recalculate_active_work_item_slas, work_item_sla_hours, write_audit
 
@@ -89,150 +89,6 @@ def _role_payload(db: Session, role: AdminRole) -> dict:
     }
 
 
-# 风险页只承载需要管理员处置的异常，不重复展示社区审核或病例复核中的普通待办。
-RISK_EVENTS_SQL = """
-    SELECT * FROM (
-        SELECT
-            'repeated_login_failure'::text AS type,
-            'high'::text AS risk_level,
-            COALESCE(target, '未知账号') AS subject,
-            format('同一来源在 24 小时内登录或验证失败 %s 次', count(*)) AS detail,
-            ip_address::text AS ip_address,
-            max(created_at) AS created_at
-          FROM login_events
-         WHERE event_type IN ('login_failed', 'verification_failed')
-           AND created_at >= now() - interval '24 hours'
-         GROUP BY target, ip_address
-        HAVING count(*) >= 3
-
-        UNION ALL
-
-        SELECT
-            'unusual_login_ip'::text AS type,
-            'medium'::text AS risk_level,
-            COALESCE(NULLIF(u.display_name, ''), NULLIF(u.username, ''), le.target, le.user_id::text, '未知用户') AS subject,
-            format('24 小时内从 %s 个不同 IP 登录', count(DISTINCT le.ip_address)) AS detail,
-            NULL::text AS ip_address,
-            max(le.created_at) AS created_at
-          FROM login_events le
-          LEFT JOIN users u ON u.id = le.user_id
-         WHERE le.event_type = 'login_success'
-           AND le.ip_address IS NOT NULL
-           AND le.created_at >= now() - interval '24 hours'
-         GROUP BY le.user_id, u.display_name, u.username, le.target
-        HAVING count(DISTINCT le.ip_address) >= 3
-
-        UNION ALL
-
-        SELECT
-            'admin_permission_change'::text AS type,
-            'high'::text AS risk_level,
-            COALESCE(NULLIF(aa.display_name, ''), aa.email, al.resource_type || ' · ' || al.resource_id) AS subject,
-            concat('管理员高权限操作：', al.action, COALESCE('；' || al.reason, '')) AS detail,
-            al.ip_address,
-            al.created_at
-          FROM admin.audit_logs al
-          LEFT JOIN admin.admin_accounts aa ON aa.id = al.actor_id
-         WHERE al.action IN ('admins.status_changed', 'admins.roles_changed', 'roles.created', 'roles.updated', 'roles.deleted', 'settings.updated')
-           AND al.created_at >= now() - interval '7 days'
-
-        UNION ALL
-
-        SELECT
-            'sensitive_admin_action'::text AS type,
-            'medium'::text AS risk_level,
-            COALESCE(NULLIF(aa.display_name, ''), aa.email, al.resource_type || ' · ' || al.resource_id) AS subject,
-            concat('敏感管理操作：', al.action, COALESCE('；' || al.reason, '')) AS detail,
-            al.ip_address,
-            al.created_at
-          FROM admin.audit_logs al
-          LEFT JOIN admin.admin_accounts aa ON aa.id = al.actor_id
-         WHERE al.action IN ('sensitive_access.granted', 'sensitive_access.used', 'users.sessions_revoked', 'users.status_changed')
-           AND al.created_at >= now() - interval '7 days'
-
-        UNION ALL
-
-        SELECT
-            'multimodal_failure'::text AS type,
-            'high'::text AS risk_level,
-            COALESCE(NULLIF(c.title, ''), '多模态问诊') AS subject,
-            COALESCE(dma.error_message, '多模态解析失败，请检查模型能力与请求参数') AS detail,
-            NULL::text AS ip_address,
-            dma.created_at
-          FROM diagnosis_multimodal_analyses dma
-          LEFT JOIN conversations c ON c.id = dma.conversation_id
-         WHERE dma.status = 'failed'
-           AND dma.created_at >= now() - interval '7 days'
-
-        UNION ALL
-
-        SELECT
-            'background_job_failure'::text AS type,
-            'high'::text AS risk_level,
-            bj.job_type AS subject,
-            COALESCE(bj.error_message, '后台任务失败，请查看任务日志') AS detail,
-            NULL::text AS ip_address,
-            bj.updated_at AS created_at
-          FROM admin.background_jobs bj
-         WHERE bj.status = 'failed'
-           AND bj.updated_at >= now() - interval '7 days'
-
-        UNION ALL
-
-        SELECT
-            'report_surge'::text AS type,
-            'high'::text AS risk_level,
-            COALESCE(NULLIF(cp.title, ''), cr.post_id::text) AS subject,
-            format('24 小时内收到 %s 条待审核举报，请关注是否存在恶意内容或集中举报', count(*)) AS detail,
-            NULL::text AS ip_address,
-            max(cr.created_at) AS created_at
-          FROM community_reports cr
-          LEFT JOIN community_posts cp ON cp.id = cr.post_id
-         WHERE cr.status = 'pending'
-           AND cr.created_at >= now() - interval '24 hours'
-         GROUP BY cr.post_id, cp.title
-        HAVING count(*) >= 3
-
-        UNION ALL
-
-        SELECT
-            'posting_spike'::text AS type,
-            'medium'::text AS risk_level,
-            COALESCE(NULLIF(u.display_name, ''), NULLIF(u.username, ''), cp.author_id::text) AS subject,
-            format('1 小时内发布 %s 条公开内容，请核查是否为异常发布', count(*)) AS detail,
-            NULL::text AS ip_address,
-            max(cp.created_at) AS created_at
-          FROM community_posts cp
-          LEFT JOIN users u ON u.id = cp.author_id
-         WHERE cp.status = 'published'
-           AND cp.created_at >= now() - interval '1 hour'
-         GROUP BY cp.author_id, u.display_name, u.username
-        HAVING count(*) >= 5
-
-        UNION ALL
-
-        SELECT
-            'critical_case_overdue'::text AS type,
-            'critical'::text AS risk_level,
-            concat(COALESCE(NULLIF(hc.title, ''), '未命名病例'), ' · ', COALESCE(f.name, '未关联养殖场')) AS subject,
-            '紧急病例已超过 4 小时，仍未发布专家复核意见' AS detail,
-            NULL::text AS ip_address,
-            hc.updated_at AS created_at
-          FROM husbandry_cases hc
-          LEFT JOIN farms f ON f.id = hc.farm_id
-         WHERE hc.severity = 'critical'
-           AND hc.status <> 'closed'
-           AND hc.updated_at <= now() - (:critical_case_sla_hours * interval '1 hour')
-           AND NOT EXISTS (
-                SELECT 1
-                  FROM admin.expert_reviews er
-                 WHERE er.husbandry_case_id = hc.id
-                   AND er.status = 'published'
-           )
-    ) AS risk_events
-    ORDER BY created_at DESC
-    LIMIT 100
-"""
 
 
 DEFAULT_RISK_RULES = {
@@ -932,7 +788,16 @@ DEFAULT_HEALTH_SETTINGS = {
     },
     "maintenance": {"enabled": False, "services": [], "ends_at": None, "message": ""},
 }
-HEALTH_SERVICE_ORDER = ("admin_api", "database", "user_api", "object_storage")
+HEALTH_SERVICE_ORDER = (
+    "admin_api",
+    "database",
+    "user_api",
+    "object_storage",
+    "redis",
+    "qdrant",
+    "opensearch",
+    "neo4j",
+)
 
 
 def _health_settings(db: Session) -> dict:
@@ -981,6 +846,71 @@ def _health_http_probe(url: str, timeout_seconds: float, label: str, *, range_re
         return {"status": "failed", "latency_ms": round((perf_counter() - started) * 1000), "status_code": None, "detail": f"{label} 不可达：{str(exc)[:160]}"}
 
 
+def _health_redis_probe(timeout_seconds: float) -> dict:
+    started = perf_counter()
+    try:
+        from redis import Redis
+
+        client = Redis.from_url(
+            settings.redis_url,
+            socket_connect_timeout=timeout_seconds,
+            socket_timeout=timeout_seconds,
+        )
+        try:
+            healthy = bool(client.ping())
+        finally:
+            client.close()
+        return {
+            "status": "healthy" if healthy else "failed",
+            "latency_ms": round((perf_counter() - started) * 1000),
+            "status_code": None,
+            "detail": "Redis PING 正常" if healthy else "Redis PING 未返回成功",
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "latency_ms": round((perf_counter() - started) * 1000),
+            "status_code": None,
+            "detail": f"Redis 不可达：{exc.__class__.__name__}",
+        }
+
+
+def _health_neo4j_probe(timeout_seconds: float) -> dict:
+    started = perf_counter()
+    try:
+        from neo4j import GraphDatabase
+
+        settings.require_neo4j_aura()
+        driver = GraphDatabase.driver(
+            settings.neo4j_uri,
+            auth=(settings.neo4j_user, settings.neo4j_password),
+            connection_timeout=timeout_seconds,
+        )
+        try:
+            record = driver.execute_query(
+                "RETURN 1 AS ok",
+                database_=settings.neo4j_database,
+                result_transformer_=lambda result: result.single(strict=True),
+            )
+            if record["ok"] != 1:
+                raise RuntimeError("Neo4j Aura 数据库探测未返回预期结果")
+        finally:
+            driver.close()
+        return {
+            "status": "healthy",
+            "latency_ms": round((perf_counter() - started) * 1000),
+            "status_code": None,
+            "detail": "Neo4j Aura 数据库连接正常",
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "latency_ms": round((perf_counter() - started) * 1000),
+            "status_code": None,
+            "detail": f"Neo4j 不可达：{exc.__class__.__name__}",
+        }
+
+
 def _run_service_health_checks(db: Session, config: dict) -> list[dict]:
     probes = config["probes"]
     timeout_seconds = min(15.0, max(0.5, float(probes.get("timeout_seconds") or settings.service_probe_timeout_seconds)))
@@ -1014,6 +944,19 @@ def _run_service_health_checks(db: Session, config: dict) -> list[dict]:
     else:
         storage_result = {"status": "unknown", "latency_ms": None, "status_code": None, "detail": "没有可用文件样本；可配置专用存储探测地址"}
     results.append({"key": "object_storage", "label": "对象存储", **storage_result})
+
+    results.append({"key": "redis", "label": "Redis / Celery", **_health_redis_probe(timeout_seconds)})
+    results.append({
+        "key": "qdrant",
+        "label": "Qdrant 向量库",
+        **_health_http_probe(f"{settings.qdrant_url.rstrip('/')}/healthz", timeout_seconds, "Qdrant"),
+    })
+    results.append({
+        "key": "opensearch",
+        "label": "OpenSearch BM25",
+        **_health_http_probe(f"{settings.opensearch_url.rstrip('/')}/_cluster/health", timeout_seconds, "OpenSearch"),
+    })
+    results.append({"key": "neo4j", "label": "Neo4j Aura 图数据库", **_health_neo4j_probe(timeout_seconds)})
 
     maintenance = config.get("maintenance") or {}
     for item in results:
@@ -1889,7 +1832,16 @@ def put_risk_settings(
 @router.get("/models")
 def models(db: Session = Depends(get_db), actor: AdminActor = Depends(require_permission("models.read"))) -> dict:
     items = db.scalars(select(SystemModelConfig).order_by(SystemModelConfig.created_at.desc())).all()
-    return {"items": [_model_dict(item) for item in items]}
+    return {
+        "items": [_model_dict(item) for item in items],
+        "summary": {
+            "total": len(items),
+            "enabled": sum(item.enabled for item in items),
+            "passed": sum(item.last_test_status == "passed" for item in items),
+            "failed": sum(item.last_test_status == "failed" for item in items),
+            "untested": sum(item.last_test_status is None for item in items),
+        },
+    }
 
 
 @router.post("/models")
@@ -1901,7 +1853,7 @@ def create_model(
 ) -> dict:
     if db.scalar(select(SystemModelConfig).where(SystemModelConfig.key == payload.key.strip())) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="模型标识已存在")
-    item = SystemModelConfig(key=payload.key.strip(), label=payload.label.strip(), model_id=payload.model_id.strip(), api_base_url=payload.api_base_url.strip(), api_key_ciphertext=encrypt_secret(payload.api_key) if payload.api_key else None, capability=payload.capability, enabled=payload.enabled)
+    item = SystemModelConfig(key=payload.key.strip(), label=payload.label.strip(), model_id=payload.model_id.strip(), api_base_url=payload.api_base_url.strip().rstrip("/"), api_key_ciphertext=encrypt_secret(payload.api_key) if payload.api_key else None, capability=payload.capability, enabled=payload.enabled)
     db.add(item)
     db.flush()
     write_audit(db, actor_id=actor.id, action="models.created", resource_type="system_model", resource_id=str(item.id), request=request, reason=payload.reason, after_data={"key": item.key, "model_id": item.model_id, "enabled": item.enabled})
@@ -1920,10 +1872,33 @@ def update_model(
     item = db.get(SystemModelConfig, model_config_id)
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="系统模型不存在")
+    normalized_key = payload.key.strip()
+    duplicate = db.scalar(
+        select(SystemModelConfig).where(
+            SystemModelConfig.key == normalized_key,
+            SystemModelConfig.id != item.id,
+        )
+    )
+    if duplicate is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="模型标识已存在")
     before = _model_dict(item)
-    item.key, item.label, item.model_id, item.api_base_url, item.capability, item.enabled, item.updated_at = payload.key.strip(), payload.label.strip(), payload.model_id.strip(), payload.api_base_url.strip(), payload.capability, payload.enabled, now_utc()
-    if payload.api_key:
+    normalized_base_url = payload.api_base_url.strip().rstrip("/")
+    connection_changed = any((
+        item.model_id != payload.model_id.strip(),
+        item.api_base_url.rstrip("/") != normalized_base_url,
+        item.capability != payload.capability,
+        bool(payload.api_key),
+        payload.clear_api_key and bool(item.api_key_ciphertext),
+    ))
+    item.key, item.label, item.model_id, item.api_base_url, item.capability, item.enabled, item.updated_at = normalized_key, payload.label.strip(), payload.model_id.strip(), normalized_base_url, payload.capability, payload.enabled, now_utc()
+    if payload.clear_api_key:
+        item.api_key_ciphertext = None
+    elif payload.api_key:
         item.api_key_ciphertext = encrypt_secret(payload.api_key)
+    if connection_changed:
+        item.last_test_status = None
+        item.last_test_message = None
+        item.last_test_at = None
     write_audit(db, actor_id=actor.id, action="models.updated", resource_type="system_model", resource_id=str(item.id), request=request, reason=payload.reason, before_data=before, after_data={"key": item.key, "model_id": item.model_id, "enabled": item.enabled})
     db.commit()
     return _model_dict(item)
@@ -1945,11 +1920,34 @@ def test_model(
     base_url = item.api_base_url.rstrip("/")
     if not base_url.startswith(("https://", "http://")):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="模型地址必须使用 HTTP 或 HTTPS")
-    test_url = f"{base_url}/models" if not base_url.endswith("/models") else base_url
-    headers = {"authorization": f"Bearer {decrypt_secret(item.api_key_ciphertext)}"} if item.api_key_ciphertext else {}
+    model_api_key = decrypt_secret(item.api_key_ciphertext) if item.api_key_ciphertext else settings.dashscope_api_key
+    headers = {"authorization": f"Bearer {model_api_key}"} if model_api_key else {}
     before = _model_dict(item)
     try:
-        response = httpx.get(test_url, headers=headers, timeout=8.0, follow_redirects=True)
+        if item.capability in {"chat", "vision"}:
+            response = httpx.post(
+                f"{base_url}/chat/completions",
+                headers={**headers, "content-type": "application/json"},
+                json={"model": item.model_id, "messages": [{"role": "user", "content": "只回复 OK"}], "max_tokens": 8, "enable_thinking": False},
+                timeout=20.0,
+            )
+        elif item.capability == "embedding":
+            response = httpx.post(
+                f"{base_url}/embeddings",
+                headers={**headers, "content-type": "application/json"},
+                json={"model": item.model_id, "input": ["养蚕知识库连通性测试"], "dimensions": 1024, "encoding_format": "float"},
+                timeout=20.0,
+            )
+        elif item.capability == "rerank":
+            response = httpx.post(
+                f"{base_url}/reranks",
+                headers={**headers, "content-type": "application/json"},
+                json={"model": item.model_id, "query": "蚕病防治", "documents": ["保持蚕室清洁并做好消毒"], "top_n": 1},
+                timeout=20.0,
+            )
+        else:
+            test_url = f"{base_url}/models" if not base_url.endswith("/models") else base_url
+            response = httpx.get(test_url, headers=headers, timeout=8.0, follow_redirects=True)
         if 200 <= response.status_code < 400:
             item.last_test_status, item.last_test_message = "passed", f"HTTP {response.status_code}"
         else:
@@ -1962,50 +1960,6 @@ def test_model(
     return _model_dict(item)
 
 
-@router.get("/knowledge/sources")
-def knowledge_sources(db: Session = Depends(get_db), actor: AdminActor = Depends(require_permission("knowledge.read"))) -> dict:
-    items = db.scalars(select(KnowledgeSource).order_by(KnowledgeSource.updated_at.desc())).all()
-    return {"items": [_knowledge_dict(item) for item in items]}
-
-
-@router.post("/knowledge/sources")
-def create_knowledge_source(
-    payload: KnowledgeSourceRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-    actor: AdminActor = Depends(require_permission("knowledge.manage")),
-) -> dict:
-    item = KnowledgeSource(title=payload.title.strip(), source_type=payload.source_type, source_url=payload.source_url, version=payload.version.strip(), license_note=payload.license_note, status=payload.status, created_by_id=actor.id)
-    db.add(item)
-    db.flush()
-    write_audit(db, actor_id=actor.id, action="knowledge.source_created", resource_type="knowledge_source", resource_id=str(item.id), request=request, reason=payload.reason, after_data={"title": item.title, "status": item.status})
-    db.commit()
-    return _knowledge_dict(item)
-
-
-@router.post("/knowledge/sources/{source_id}/index")
-def index_knowledge_source(
-    source_id: UUID,
-    payload: ReasonRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-    actor: AdminActor = Depends(require_permission("knowledge.manage")),
-) -> dict:
-    item = db.get(KnowledgeSource, source_id)
-    if item is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识源不存在")
-    if item.status == "disabled":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已停用的知识源不能入库")
-    before_status = item.status
-    job = BackgroundJob(job_type="knowledge_index", status="queued", payload={"knowledge_source_id": str(item.id), "source_url": item.source_url, "version": item.version}, requested_by_id=actor.id)
-    item.status, item.updated_at = "processing", now_utc()
-    db.add(job)
-    db.flush()
-    write_audit(db, actor_id=actor.id, action="knowledge.index_queued", resource_type="knowledge_source", resource_id=str(item.id), request=request, reason=payload.reason, before_data={"status": before_status}, after_data={"job_id": str(job.id), "status": "processing"})
-    db.commit()
-    return {"source": _knowledge_dict(item), "job": _job_dict(job)}
-
-
 @router.get("/jobs")
 def jobs(
     job_status: str | None = Query(default=None, alias="status", pattern="^(queued|running|succeeded|failed|cancelled)$"),
@@ -2015,8 +1969,227 @@ def jobs(
     query = select(BackgroundJob)
     if job_status:
         query = query.where(BackgroundJob.status == job_status)
+    count_query = select(func.count()).select_from(BackgroundJob)
+    if job_status:
+        count_query = count_query.where(BackgroundJob.status == job_status)
+    total = int(db.scalar(count_query) or 0)
     items = db.scalars(query.order_by(BackgroundJob.created_at.desc()).limit(200)).all()
-    return {"items": [_job_dict(item) for item in items]}
+    status_counts = {
+        str(row_status): int(count)
+        for row_status, count in db.execute(
+            select(BackgroundJob.status, func.count()).group_by(BackgroundJob.status)
+        ).all()
+    }
+    return {
+        "items": [_job_dict(item) for item in items],
+        "total": total,
+        "summary": {
+            "all": sum(status_counts.values()),
+            "queued": status_counts.get("queued", 0),
+            "running": status_counts.get("running", 0),
+            "succeeded": status_counts.get("succeeded", 0),
+            "failed": status_counts.get("failed", 0),
+            "cancelled": status_counts.get("cancelled", 0),
+        },
+    }
+
+
+def _job_payload_uuid(item: BackgroundJob, key: str) -> UUID:
+    value = item.payload.get(key)
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"任务缺少有效的 {key}，无法继续操作",
+        ) from exc
+
+
+def _source_for_build_run(db: Session, run: KnowledgeBuildRun) -> KnowledgeSource:
+    version = db.get(KnowledgeSourceVersion, run.source_version_id)
+    source = db.get(KnowledgeSource, version.source_id) if version else None
+    if source is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="任务关联的知识源不存在")
+    return source
+
+
+def _refresh_source_after_build_cancel(db: Session, run: KnowledgeBuildRun, now: datetime) -> None:
+    source = _source_for_build_run(db, run)
+    active_count = int(
+        db.scalar(
+            select(func.count())
+            .select_from(KnowledgeBuildRun)
+            .join(KnowledgeSourceVersion, KnowledgeSourceVersion.id == KnowledgeBuildRun.source_version_id)
+            .where(
+                KnowledgeSourceVersion.source_id == source.id,
+                KnowledgeBuildRun.id != run.id,
+                KnowledgeBuildRun.status.in_(("queued", "running", "awaiting_review", "publishing")),
+            )
+        )
+        or 0
+    )
+    if active_count:
+        source.status = "processing"
+    else:
+        succeeded_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(KnowledgeBuildRun)
+                .join(KnowledgeSourceVersion, KnowledgeSourceVersion.id == KnowledgeBuildRun.source_version_id)
+                .where(
+                    KnowledgeSourceVersion.source_id == source.id,
+                    KnowledgeBuildRun.id != run.id,
+                    KnowledgeBuildRun.status == "succeeded",
+                )
+            )
+            or 0
+        )
+        source.status = "ready" if source.published_version_id or succeeded_count else "draft"
+    source.updated_at = now
+
+
+def _patch_knowledge_job(
+    item: BackgroundJob,
+    payload: JobActionRequest,
+    request: Request,
+    db: Session,
+    actor: AdminActor,
+) -> dict:
+    before = item.status
+    now = now_utc()
+    run: KnowledgeBuildRun | None = None
+    publication: KnowledgePublication | None = None
+    source: KnowledgeSource | None = None
+
+    if item.job_type == "knowledge_build":
+        run = db.get(KnowledgeBuildRun, _job_payload_uuid(item, "build_run_id"))
+        if run is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="任务关联的知识构建记录不存在")
+        source = _source_for_build_run(db, run)
+    else:
+        publication = db.get(KnowledgePublication, _job_payload_uuid(item, "publication_id"))
+        if publication is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="任务关联的发布记录不存在")
+        run = db.get(KnowledgeBuildRun, publication.build_run_id)
+        if run is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="发布记录关联的知识构建不存在")
+
+    if payload.action == "retry":
+        if item.status != "failed":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="仅失败任务可以重试")
+        if source is not None and source.status == "disabled":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="知识源已停用，恢复后才能重试构建")
+        item.status = "queued"
+        item.progress = 0
+        item.result = {}
+        item.error_message = None
+        item.started_at = None
+        item.completed_at = None
+        if item.job_type == "knowledge_build":
+            run.status = "queued"
+            run.progress = 0
+            run.current_node = "retry_queued"
+            run.error_message = None
+            run.started_at = None
+            run.completed_at = None
+            run.updated_at = now
+            source.status = "processing"
+            source.updated_at = now
+        else:
+            publication.status = "staging"
+            publication.error_message = None
+            publication.updated_at = now
+            run.status = "publishing"
+            run.current_node = "publish_retry_queued"
+            run.error_message = None
+            run.updated_at = now
+    else:
+        if item.status not in {"queued", "running"}:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="任务当前不能取消")
+        item.status = "cancelled"
+        item.completed_at = now
+        if item.job_type == "knowledge_build":
+            run.status = "cancelled"
+            run.current_node = "cancelled"
+            run.completed_at = now
+            run.updated_at = now
+            db.add(
+                KnowledgeBuildEvent(
+                    build_run_id=run.id,
+                    node="cancelled",
+                    level="warning",
+                    message="构建任务已由管理员取消",
+                    payload={"reason": payload.reason},
+                )
+            )
+            _refresh_source_after_build_cancel(db, run, now)
+        else:
+            publication.status = "rolled_back"
+            publication.error_message = None
+            publication.updated_at = now
+            run.status = "succeeded"
+            run.current_node = "ready_to_publish"
+            run.progress = 100
+            run.error_message = None
+            run.updated_at = now
+            db.add(
+                KnowledgeBuildEvent(
+                    build_run_id=run.id,
+                    node="publish_cancelled",
+                    level="warning",
+                    message="发布任务已由管理员取消，构建成果仍可重新发布",
+                    payload={"reason": payload.reason, "publication_id": str(publication.id)},
+                )
+            )
+
+    item.updated_at = now
+    write_audit(
+        db,
+        actor_id=actor.id,
+        action=f"jobs.{payload.action}",
+        resource_type="background_job",
+        resource_id=str(item.id),
+        request=request,
+        reason=payload.reason,
+        before_data={"status": before},
+        after_data={"status": item.status},
+    )
+    db.commit()
+
+    if payload.action == "retry":
+        try:
+            from app.knowledge.tasks import dispatch_background_job
+
+            dispatch_background_job(item.id)
+        except Exception as exc:
+            failed_at = now_utc()
+            item.status = "failed"
+            item.error_message = f"任务队列不可用：{exc.__class__.__name__}"
+            item.completed_at = failed_at
+            item.updated_at = failed_at
+            if item.job_type == "knowledge_build":
+                run.status = "failed"
+                run.current_node = "retry_queue_dispatch_failed"
+                run.error_message = item.error_message
+                run.completed_at = failed_at
+                run.updated_at = failed_at
+                source.status = "failed"
+                source.updated_at = failed_at
+            else:
+                publication.status = "failed"
+                publication.error_message = item.error_message
+                publication.updated_at = failed_at
+                run.status = "failed"
+                run.current_node = "publish_retry_queue_dispatch_failed"
+                run.error_message = item.error_message
+                run.completed_at = failed_at
+                run.updated_at = failed_at
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="任务队列暂时不可用，任务仍可重试",
+            ) from exc
+    return _job_dict(item)
 
 
 @router.patch("/jobs/{job_id}")
@@ -2030,18 +2203,71 @@ def patch_job(
     item = db.get(BackgroundJob, job_id)
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+    if item.job_type in {"knowledge_build", "knowledge_publish"}:
+        return _patch_knowledge_job(item, payload, request, db, actor)
+    if payload.action == "retry":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该任务类型没有可用的重试执行器")
     before = item.status
     if payload.action == "retry":
         if item.status != "failed":
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="仅失败任务可重试")
         item.status, item.progress, item.error_message, item.started_at, item.completed_at = "queued", 0, None, None, None
+        if item.job_type == "knowledge_build" and item.payload.get("build_run_id"):
+            from app.models import KnowledgeBuildRun
+
+            run = db.get(KnowledgeBuildRun, UUID(str(item.payload["build_run_id"])))
+            if run:
+                run.status, run.progress, run.error_message, run.completed_at = "queued", 0, None, None
+                run.current_node, run.updated_at = "retry_queued", now_utc()
+        elif item.job_type == "knowledge_publish" and item.payload.get("publication_id"):
+            from app.models import KnowledgeBuildRun, KnowledgePublication
+
+            publication = db.get(KnowledgePublication, UUID(str(item.payload["publication_id"])))
+            if publication:
+                publication.status, publication.error_message, publication.updated_at = "staging", None, now_utc()
+                run = db.get(KnowledgeBuildRun, publication.build_run_id)
+                if run:
+                    run.status, run.current_node, run.error_message, run.updated_at = "publishing", "publish_retry_queued", None, now_utc()
     else:
         if item.status not in {"queued", "running"}:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="任务当前不能取消")
         item.status, item.completed_at = "cancelled", now_utc()
+        if item.payload.get("build_run_id"):
+            from app.models import KnowledgeBuildRun
+
+            run = db.get(KnowledgeBuildRun, UUID(str(item.payload["build_run_id"])))
+            if run:
+                run.status, run.current_node, run.completed_at, run.updated_at = "cancelled", "cancelled", now_utc(), now_utc()
     item.updated_at = now_utc()
     write_audit(db, actor_id=actor.id, action=f"jobs.{payload.action}", resource_type="background_job", resource_id=str(item.id), request=request, reason=payload.reason, before_data={"status": before}, after_data={"status": item.status})
     db.commit()
+    if payload.action == "retry" and item.job_type in {"knowledge_build", "knowledge_publish"}:
+        try:
+            from app.knowledge.tasks import dispatch_background_job
+
+            dispatch_background_job(item.id)
+        except Exception as exc:
+            failed_at = now_utc()
+            item.status, item.error_message, item.completed_at, item.updated_at = "failed", f"任务队列不可用：{exc.__class__.__name__}", failed_at, failed_at
+            if item.job_type == "knowledge_build" and item.payload.get("build_run_id"):
+                from app.models import KnowledgeBuildRun
+
+                run = db.get(KnowledgeBuildRun, UUID(str(item.payload["build_run_id"])))
+                if run:
+                    run.status, run.current_node = "failed", "retry_queue_dispatch_failed"
+                    run.error_message, run.completed_at, run.updated_at = item.error_message, failed_at, failed_at
+            elif item.job_type == "knowledge_publish" and item.payload.get("publication_id"):
+                from app.models import KnowledgeBuildRun, KnowledgePublication
+
+                publication = db.get(KnowledgePublication, UUID(str(item.payload["publication_id"])))
+                if publication:
+                    publication.status, publication.error_message, publication.updated_at = "failed", item.error_message, failed_at
+                    run = db.get(KnowledgeBuildRun, publication.build_run_id)
+                    if run:
+                        run.status, run.current_node = "failed", "publish_retry_queue_dispatch_failed"
+                        run.error_message, run.completed_at, run.updated_at = item.error_message, failed_at, failed_at
+            db.commit()
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="任务队列暂不可用，任务仍可重试") from exc
     return _job_dict(item)
 
 
@@ -2182,12 +2408,9 @@ def _validate_risk_rules(value: dict) -> None:
 
 
 def _model_dict(item: SystemModelConfig) -> dict:
-    return {"id": str(item.id), "key": item.key, "label": item.label, "model_id": item.model_id, "api_base_url": item.api_base_url, "capability": item.capability, "enabled": item.enabled, "has_api_key": bool(item.api_key_ciphertext), "last_test_status": item.last_test_status, "last_test_message": item.last_test_message, "last_test_at": item.last_test_at, "created_at": item.created_at, "updated_at": item.updated_at}
-
-
-def _knowledge_dict(item: KnowledgeSource) -> dict:
-    return {"id": str(item.id), "title": item.title, "source_type": item.source_type, "source_url": item.source_url, "status": item.status, "version": item.version, "license_note": item.license_note, "metadata": item.metadata_, "created_at": item.created_at, "updated_at": item.updated_at}
+    credential_source = "model" if item.api_key_ciphertext else "system" if settings.dashscope_api_key else "missing"
+    return {"id": str(item.id), "key": item.key, "label": item.label, "model_id": item.model_id, "api_base_url": item.api_base_url, "capability": item.capability, "enabled": item.enabled, "has_api_key": bool(item.api_key_ciphertext), "credential_source": credential_source, "last_test_status": item.last_test_status, "last_test_message": item.last_test_message, "last_test_at": item.last_test_at, "created_at": item.created_at, "updated_at": item.updated_at}
 
 
 def _job_dict(item: BackgroundJob) -> dict:
-    return {"id": str(item.id), "job_type": item.job_type, "status": item.status, "progress": item.progress, "result": item.result, "error_message": item.error_message, "created_at": item.created_at, "updated_at": item.updated_at, "started_at": item.started_at, "completed_at": item.completed_at}
+    return {"id": str(item.id), "job_type": item.job_type, "status": item.status, "progress": item.progress, "payload": item.payload, "result": item.result, "error_message": item.error_message, "created_at": item.created_at, "updated_at": item.updated_at, "started_at": item.started_at, "completed_at": item.completed_at}

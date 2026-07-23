@@ -36,7 +36,7 @@ from app.models import (
     UserSettings,
 )
 from app.schemas.diagnosis import (
-    DiagnosisChatMessage,
+    DiagnosisContextMessage,
     DiagnosisConversationDetailResponse,
     DiagnosisExpertReviewResponse,
     DiagnosisConversationResponse,
@@ -47,6 +47,11 @@ from app.schemas.diagnosis import (
     DiagnosisConversationTurnResponse,
     DiagnosisMessageResponse,
     PublicDiagnosisConversationShareResponse,
+)
+from app.services.diagnosis_agent_service import (
+    agent_run_from_message_metadata,
+    execute_diagnosis_agent,
+    link_agent_run_to_assistant_message,
 )
 from app.services.llm_client import (
     LLMConfigurationError,
@@ -59,28 +64,11 @@ from app.services.model_config_service import resolve_current_user_llm_config
 from app.services.storage_service import delete_object_file, upload_object_file
 
 
-SYSTEM_PROMPT = """你是 CanW 家蚕疾病问诊助手，面向养蚕农户和农技人员。
-你的任务是根据用户描述进行初步问诊、追问关键症状，并给出谨慎的处置建议。
-要求：
-1. 使用中文，语气清楚、稳妥、可执行。
-2. 不要把初步判断说成确诊；需要用户补充证据时直接列出要补充的信息。
-3. 对传染性或死亡扩散风险，优先提醒隔离、清理病死蚕、消毒、通风和记录发病比例。
-4. 当前阶段还没有接入 RAG 和知识图谱，不要编造文献、图谱路径或引用来源。
-5. 使用 Markdown 输出，不要输出 JSON。必要时用 ## 二级标题分段，例如：初步判断、判断依据、临时处理建议、需要补充的信息、风险提醒。
-6. 每段保持简洁；关键结论可用 **加粗**，执行步骤用编号或无序列表。只有确实需要填写模板或字段时才使用 ``` 代码块。
-7. 不要伪造思考过程、引用、检测结果或来源。若信息不足，要明确说明判断边界。
-"""
-
 MULTIMODAL_ANALYSIS_PROMPT = """你是 CanW 家蚕疾病多模态材料解析器。
 你只负责观察、转写、提取关键词和整理检索线索，不要给最终诊断结论，不要给处置方案。
 请尽量输出严格 JSON，字段包括：
 observations, symptoms, environment_clues, possible_entities, retrieval_queries, missing_info, risk_notes。
 如果材料不足，请在 missing_info 中说明还需要补充什么。
-"""
-
-MULTIMODAL_REPLY_INSTRUCTION = """当前用户可能同时上传了图片、视频或文档。
-请优先直接阅读随消息提供的多模态文件；如果当前模型无法读取某类文件，请明确说明限制，并基于可见材料和用户文本继续给出稳妥建议。
-不要编造看不到的画面、文档内容或检测结果。
 """
 
 DOCUMENT_EXTENSIONS = {
@@ -620,7 +608,10 @@ def regenerate_current_user_diagnosis_message(
     conversation_id: UUID,
     message_id: UUID,
     model_config_id: UUID | None = None,
+    event_callback=None,
 ) -> DiagnosisMessageMutationResponse:
+    if not settings.diagnosis_agent_enabled:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="证据型问诊智能体当前未启用")
     conversation, assistant_message = _get_current_user_message(
         db,
         user=user,
@@ -653,23 +644,37 @@ def regenerate_current_user_diagnosis_message(
         before_message=source_user_message,
     )
 
-    try:
-        reply = generate_diagnosis_reply(
-            settings,
-            message=source_user_message.content,
-            history=history,
-            model_config=model_config,
-            user_preferences=user_preferences,
-        )
-    except (LLMProviderError, LLMConfigurationError):
-        current_time = now_utc()
-        assistant_message.status = "failed"
-        assistant_message.content = "模型调用失败，请稍后重试。"
-        assistant_message.updated_at = current_time
-        conversation.updated_at = current_time
-        db.add_all([conversation, assistant_message])
-        db.commit()
-        raise
+    source_metadata = source_user_message.metadata_ or {}
+    structured_data = source_metadata.get("structured_data")
+    if not isinstance(structured_data, dict):
+        structured_data = {}
+    multimodal_analysis = db.scalar(
+        select(DiagnosisMultimodalAnalysis)
+        .where(DiagnosisMultimodalAnalysis.message_id == source_user_message.id)
+        .order_by(desc(DiagnosisMultimodalAnalysis.created_at))
+    )
+    multimodal_observations: dict[str, Any] = {}
+    if multimodal_analysis is not None and multimodal_analysis.status == "completed":
+        multimodal_observations = dict(multimodal_analysis.analysis_json or {})
+        if multimodal_analysis.analysis_text:
+            multimodal_observations["analysis_text"] = multimodal_analysis.analysis_text
+
+    execution = execute_diagnosis_agent(
+        db,
+        user=user,
+        conversation=conversation,
+        user_message=source_user_message,
+        settings=settings,
+        model_config=model_config,
+        original_question=source_user_message.content,
+        history=history,
+        structured_data=structured_data,
+        multimodal_observations=multimodal_observations,
+        user_preferences=user_preferences,
+        event_callback=event_callback,
+    )
+    reply = execution.result.answer
+    agent_run_response = execution.response()
 
     current_time = now_utc()
     metadata = dict(assistant_message.metadata_ or {})
@@ -678,11 +683,15 @@ def regenerate_current_user_diagnosis_message(
             "provider": model_config.provider_name,
             "model": model_config.model_id,
             "model_config_id": str(model_config.config_id) if model_config.config_id else None,
-            "pipeline": "llm_only",
+            "pipeline": "agentic_kg_rag",
+            "agent_run": agent_run_response.model_dump(mode="json"),
             "regenerated_at": current_time.isoformat(),
+            "long_term_memory_enabled": False,
         }
     )
     metadata.pop("feedback", None)
+    metadata.pop("feedback_reasons", None)
+    metadata.pop("feedback_detail", None)
     assistant_message.content = reply
     assistant_message.status = "sent"
     assistant_message.metadata_ = metadata
@@ -690,6 +699,8 @@ def regenerate_current_user_diagnosis_message(
     conversation.updated_at = current_time
     conversation.last_message_at = current_time
     db.add_all([conversation, assistant_message])
+    db.flush()
+    link_agent_run_to_assistant_message(db, execution=execution, assistant_message=assistant_message)
     db.commit()
     db.refresh(conversation)
     db.refresh(assistant_message)
@@ -705,12 +716,15 @@ def create_current_user_diagnosis_turn(
     conversation_id: UUID | None = None,
     model_config_id: UUID | None = None,
     project_id: UUID | None = None,
+    event_callback=None,
 ) -> DiagnosisConversationTurnResponse:
     normalized_message = message.strip()
     user_preferences = _preferences_for_user(db, user)
     auto_generate_title = bool(user_preferences.get("auto_generate_title", True))
     if not normalized_message:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="问诊内容不能为空")
+    if not settings.diagnosis_agent_enabled:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="证据型问诊智能体当前未启用")
 
     model_config = resolve_current_user_llm_config(
         db,
@@ -754,17 +768,22 @@ def create_current_user_diagnosis_turn(
     db.refresh(conversation)
     db.refresh(user_message)
 
-    try:
-        reply = generate_diagnosis_reply(
-            settings,
-            message=normalized_message,
-            history=history,
-            model_config=model_config,
-            user_preferences=user_preferences,
-        )
-    except (LLMProviderError, LLMConfigurationError):
-        _save_failed_assistant_message(db, conversation=conversation, model_config=model_config)
-        raise
+    execution = execute_diagnosis_agent(
+        db,
+        user=user,
+        conversation=conversation,
+        user_message=user_message,
+        settings=settings,
+        model_config=model_config,
+        original_question=normalized_message,
+        history=history,
+        structured_data={},
+        multimodal_observations={},
+        user_preferences=user_preferences,
+        event_callback=event_callback,
+    )
+    reply = execution.result.answer
+    agent_run_response = execution.response()
 
     assistant_message = Message(
         conversation_id=conversation.id,
@@ -776,14 +795,17 @@ def create_current_user_diagnosis_turn(
             "provider": model_config.provider_name,
             "model": model_config.model_id,
             "model_config_id": str(model_config.config_id) if model_config.config_id else None,
-            "pipeline": "llm_only",
+            "pipeline": "agentic_kg_rag",
+            "agent_run": agent_run_response.model_dump(mode="json"),
             "knowledge_graph_enabled": bool(user_preferences.get("knowledge_graph_enabled", True)),
             "rag_enabled": bool(user_preferences.get("rag_enabled", True)),
-            "long_term_memory_enabled": bool(user_preferences.get("long_term_memory_enabled", True)),
+            "long_term_memory_enabled": False,
         },
     )
     conversation.last_message_at = now_utc()
     db.add(assistant_message)
+    db.flush()
+    link_agent_run_to_assistant_message(db, execution=execution, assistant_message=assistant_message)
     db.commit()
     db.refresh(conversation)
     db.refresh(assistant_message)
@@ -794,6 +816,7 @@ def create_current_user_diagnosis_turn(
         assistant_message=_message_response(assistant_message),
         model=model_config.model_id,
         provider=model_config.provider_name,
+        agent_run=agent_run_response,
     )
 
 
@@ -809,6 +832,7 @@ def create_current_user_multimodal_diagnosis_turn(
     conversation_id: UUID | None = None,
     model_config_id: UUID | None = None,
     project_id: UUID | None = None,
+    event_callback=None,
 ) -> DiagnosisConversationTurnResponse:
     normalized_message = message.strip()
     structured_payload = structured_data or {}
@@ -821,6 +845,8 @@ def create_current_user_multimodal_diagnosis_turn(
     )
     if not normalized_message and not attachments and not preuploaded_files and not structured_payload:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="问诊内容不能为空")
+    if not settings.diagnosis_agent_enabled:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="证据型问诊智能体当前未启用")
 
     title_source = normalized_message or _title_from_attachments(
         attachments,
@@ -912,14 +938,12 @@ def create_current_user_multimodal_diagnosis_turn(
         db.refresh(user_message)
         db.refresh(analysis)
 
-        reply, analysis_json, analysis_text = generate_diagnosis_reply_with_direct_materials(
+        analysis_json, analysis_text = analyze_multimodal_materials(
             settings,
             model_config=model_config,
             message=normalized_message,
-            history=history,
             files=uploaded_files,
             structured_data=structured_payload,
-            user_preferences=user_preferences,
         )
         analysis.status = "completed"
         analysis.analysis_json = analysis_json
@@ -929,7 +953,7 @@ def create_current_user_multimodal_diagnosis_turn(
         user_metadata = dict(user_message.metadata_ or {})
         user_metadata.update(
             {
-                "pipeline": "multimodal_direct",
+                "pipeline": "multimodal_agent_ready",
                 "attachment_file_ids": [str(file.id) for file in uploaded_files],
                 "multimodal_analysis_id": str(analysis.id),
             }
@@ -940,6 +964,25 @@ def create_current_user_multimodal_diagnosis_turn(
         db.refresh(conversation)
         db.refresh(user_message)
         db.refresh(analysis)
+
+        multimodal_observations = dict(analysis_json)
+        multimodal_observations["analysis_text"] = analysis_text
+        execution = execute_diagnosis_agent(
+            db,
+            user=user,
+            conversation=conversation,
+            user_message=user_message,
+            settings=settings,
+            model_config=model_config,
+            original_question=normalized_message,
+            history=history,
+            structured_data=structured_payload,
+            multimodal_observations=multimodal_observations,
+            user_preferences=user_preferences,
+            event_callback=event_callback,
+        )
+        reply = execution.result.answer
+        agent_run_response = execution.response()
 
     except (LLMProviderError, LLMConfigurationError) as error:
         if "analysis" in locals() and analysis.status != "completed":
@@ -964,17 +1007,18 @@ def create_current_user_multimodal_diagnosis_turn(
             "provider": model_config.provider_name,
             "model": model_config.model_id,
             "model_config_id": str(model_config.config_id) if model_config.config_id else None,
-            "pipeline": "multimodal_direct",
+            "pipeline": "agentic_kg_rag_multimodal",
+            "agent_run": agent_run_response.model_dump(mode="json"),
             "multimodal_analysis_id": str(analysis.id),
-            "rag_context": None,
-            "kg_context": None,
             "knowledge_graph_enabled": bool(user_preferences.get("knowledge_graph_enabled", True)),
             "rag_enabled": bool(user_preferences.get("rag_enabled", True)),
-            "long_term_memory_enabled": bool(user_preferences.get("long_term_memory_enabled", True)),
+            "long_term_memory_enabled": False,
         },
     )
     conversation.last_message_at = now_utc()
     db.add(assistant_message)
+    db.flush()
+    link_agent_run_to_assistant_message(db, execution=execution, assistant_message=assistant_message)
     db.commit()
     db.refresh(conversation)
     db.refresh(user_message)
@@ -986,6 +1030,7 @@ def create_current_user_multimodal_diagnosis_turn(
         assistant_message=_message_response(assistant_message),
         model=model_config.model_id,
         provider=model_config.provider_name,
+        agent_run=agent_run_response,
     )
 
 
@@ -1055,26 +1100,6 @@ def move_current_user_diagnosis_conversation_project(
     return _conversation_response(conversation)
 
 
-def generate_diagnosis_reply(
-    settings: Settings,
-    *,
-    message: str,
-    history: list[DiagnosisChatMessage],
-    model_config: OpenAICompatibleModelConfig | None = None,
-    user_preferences: dict[str, Any] | None = None,
-) -> str:
-    request_config = model_config or _model_config_from_settings(settings)
-    return request_openai_compatible_reply(
-        request_config,
-        messages=_build_messages(
-            message=message,
-            history=history,
-            system_prompt=_diagnosis_system_prompt(user_preferences),
-        ),
-        timeout_seconds=settings.openai_timeout_seconds,
-    )
-
-
 def analyze_multimodal_materials(
     settings: Settings,
     *,
@@ -1114,119 +1139,6 @@ def analyze_multimodal_materials(
     analysis_json["file_contexts"] = _file_analysis_contexts(files)
     analysis_text = _analysis_text_from_json(analysis_json, fallback=reply)
     return analysis_json, analysis_text
-
-
-def generate_diagnosis_reply_with_direct_materials(
-    settings: Settings,
-    *,
-    message: str,
-    history: list[DiagnosisChatMessage],
-    files: list[UploadedFile],
-    structured_data: dict[str, Any],
-    model_config: OpenAICompatibleModelConfig,
-    user_preferences: dict[str, Any] | None = None,
-) -> tuple[str, dict[str, Any], str]:
-    direct_messages = _build_multimodal_reply_messages(
-        message=message,
-        history=history,
-        files=files,
-        structured_data=structured_data,
-        direct_files=True,
-        include_images=True,
-        system_prompt=_diagnosis_system_prompt(user_preferences),
-    )
-    try:
-        reply = request_openai_compatible_reply(
-            model_config,
-            messages=direct_messages,
-            timeout_seconds=settings.openai_timeout_seconds,
-        )
-        analysis_json = {
-            "mode": "direct_url",
-            "fallback_used": False,
-            "file_contexts": _file_analysis_contexts(files),
-        }
-        return reply, analysis_json, _analysis_text_for_direct_materials(analysis_json)
-    except LLMProviderError as direct_error:
-        fallback_messages = _build_multimodal_reply_messages(
-            message=message,
-            history=history,
-            files=files,
-            structured_data=structured_data,
-            direct_files=False,
-            include_images=True,
-            system_prompt=_diagnosis_system_prompt(user_preferences),
-        )
-        try:
-            reply = request_openai_compatible_reply(
-                model_config,
-                messages=fallback_messages,
-                timeout_seconds=settings.openai_timeout_seconds,
-            )
-        except LLMProviderError:
-            if not _messages_include_inline_images(fallback_messages):
-                raise LLMProviderError(f"模型无法处理当前多模态材料：{direct_error}") from direct_error
-            reply = request_openai_compatible_reply(
-                model_config,
-                messages=_build_multimodal_reply_messages(
-                    message=message,
-                    history=history,
-                    files=files,
-                    structured_data=structured_data,
-                    direct_files=False,
-                    include_images=False,
-                    system_prompt=_diagnosis_system_prompt(user_preferences),
-                ),
-                timeout_seconds=settings.openai_timeout_seconds,
-            )
-
-        analysis_json = {
-            "mode": "text_fallback",
-            "fallback_used": True,
-            "direct_error": str(direct_error),
-            "file_contexts": _file_analysis_contexts(files),
-        }
-        return reply, analysis_json, _analysis_text_for_direct_materials(analysis_json)
-
-
-def generate_diagnosis_reply_with_multimodal_context(
-    settings: Settings,
-    *,
-    message: str,
-    history: list[DiagnosisChatMessage],
-    multimodal_analysis: str,
-    model_config: OpenAICompatibleModelConfig,
-) -> str:
-    final_message = "\n\n".join(
-        [
-            f"用户问题：\n{message.strip() or '用户仅上传了问诊材料。'}",
-            f"多模态解析结果：\n{multimodal_analysis.strip() or '暂无可用解析结果。'}",
-            "RAG 检索结果：\n当前阶段未接入，留空。",
-            "知识图谱查询结果：\n当前阶段未接入，留空。",
-            "请基于以上信息生成给用户的问诊回复。不要声称最终确诊，按：初步判断、判断依据、临时处理建议、需要补充的信息、风险提醒 输出。",
-        ]
-    )
-    return request_openai_compatible_reply(
-        model_config,
-        messages=_build_messages(message=final_message, history=history),
-        timeout_seconds=settings.openai_timeout_seconds,
-    )
-
-
-def _build_messages(
-    *,
-    message: str,
-    history: list[DiagnosisChatMessage],
-    system_prompt: str = SYSTEM_PROMPT,
-) -> list[dict[str, str]]:
-    messages = [{"role": "system", "content": system_prompt}]
-    for item in history[-12:]:
-        content = item.content.strip()
-        if not content:
-            continue
-        messages.append({"role": item.role, "content": content})
-    messages.append({"role": "user", "content": message.strip()})
-    return messages
 
 
 def _build_multimodal_analysis_messages(
@@ -1271,76 +1183,6 @@ def _build_multimodal_analysis_messages(
         {"role": "system", "content": MULTIMODAL_ANALYSIS_PROMPT},
         {"role": "user", "content": content if len(content) > 1 else prompt},
     ]
-
-
-def _build_multimodal_reply_messages(
-    *,
-    message: str,
-    history: list[DiagnosisChatMessage],
-    files: list[UploadedFile],
-    structured_data: dict[str, Any],
-    direct_files: bool,
-    include_images: bool,
-    system_prompt: str = SYSTEM_PROMPT,
-) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = [{"role": "system", "content": f"{system_prompt}\n\n{MULTIMODAL_REPLY_INSTRUCTION}"}]
-    for item in history[-12:]:
-        content = item.content.strip()
-        if not content:
-            continue
-        messages.append({"role": item.role, "content": content})
-
-    # 原始 URL 能被模型直接读取时仍保留可提取的文档正文：不同兼容模型对
-    # file_url 的支持不一致，正文可作为稳定的降级上下文，而不是只留下文件名。
-    file_lines = _multimodal_file_lines(files, include_extracted_text=True)
-    prompt = "\n\n".join(
-        [
-            f"用户文本：\n{message.strip() or '用户仅上传了问诊材料。'}",
-            f"结构化养殖数据：\n{json.dumps(structured_data, ensure_ascii=False) if structured_data else '无'}",
-            f"附件清单：\n{chr(10).join(file_lines) if file_lines else '无'}",
-            "请结合用户文本和所有可读取的附件给出回复。不要声称已经读取模型实际无法读取的材料。",
-        ]
-    )
-    content_parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-
-    for file in files:
-        file_url = _model_file_url(file)
-        if not file_url:
-            continue
-        if file.file_type == "image" and include_images:
-            content_parts.append({"type": "image_url", "image_url": {"url": file_url}})
-            continue
-        if not direct_files:
-            continue
-        if file.file_type == "video":
-            content_parts.append({"type": "video_url", "video_url": {"url": file_url}})
-            continue
-        if file.file_type == "document":
-            content_parts.append(
-                {
-                    "type": "file_url",
-                    "file_url": {
-                        "url": file_url,
-                        "name": file.file_name,
-                        "mime_type": file.mime_type,
-                    },
-                }
-            )
-
-    messages.append({"role": "user", "content": content_parts if len(content_parts) > 1 else prompt})
-    return messages
-
-
-def _model_config_from_settings(settings: Settings) -> OpenAICompatibleModelConfig:
-    api_key = (settings.openai_api_key or "").strip()
-    if not api_key:
-        raise LLMConfigurationError("大模型 API Key 未配置")
-    return OpenAICompatibleModelConfig(
-        provider_name="Environment",
-        model_id=settings.openai_model_id,
-        api_key=api_key,
-        api_request_url=settings.openai_base_url,
-    )
 
 
 def _save_message_attachments(
@@ -1740,54 +1582,6 @@ def _file_analysis_contexts(files: list[UploadedFile]) -> list[dict[str, Any]]:
     return [_file_analysis_context(file) for file in files]
 
 
-def _multimodal_file_lines(files: list[UploadedFile], *, include_extracted_text: bool) -> list[str]:
-    lines: list[str] = []
-    for index, file in enumerate(files, start=1):
-        context = _file_analysis_context(file)
-        note_text = context.get("extraction_note") or ""
-        direct_hint = (
-            "已随请求提供原文件 URL，若当前模型支持该类型文件输入，请直接读取。"
-            if file.file_type in {"image", "video", "document"}
-            else "已保存到对象存储。"
-        )
-        line = (
-            f"{index}. {file.file_name}，类型：{file.file_type}，MIME：{file.mime_type}，"
-            f"大小：{file.file_size} bytes，URL：{file.storage_url or file.storage_key}。{direct_hint}"
-        )
-        if note_text:
-            line = f"{line} 说明：{note_text}"
-        if include_extracted_text:
-            extracted = context.get("extracted_text")
-            if isinstance(extracted, str) and extracted.strip():
-                line = f"{line}\n   已提取文本：{_truncate_text(extracted, 2200)}"
-            elif file.file_type == "video":
-                line = f"{line}\n   视频未抽帧；如果当前模型无法读取视频 URL，请基于用户文本追问关键画面。"
-            elif file.file_type == "document":
-                line = f"{line}\n   未提取到可用文档文本；如果当前模型无法读取文档 URL，请提示用户转换或补充关键内容。"
-        lines.append(line)
-    return lines
-
-
-def _model_file_url(file: UploadedFile) -> str | None:
-    if file.file_type == "image":
-        return _image_model_url(file)
-    if file.file_type in {"video", "document"}:
-        return file.storage_url
-    return None
-
-
-def _analysis_text_for_direct_materials(analysis_json: dict[str, Any]) -> str:
-    mode = analysis_json.get("mode")
-    fallback_used = analysis_json.get("fallback_used")
-    file_contexts = analysis_json.get("file_contexts")
-    file_count = len(file_contexts) if isinstance(file_contexts, list) else 0
-    if fallback_used:
-        return f"已上传 {file_count} 个多模态材料；模型不支持全部文件 URL 直读，已降级为图片/文本兜底。"
-    if mode == "direct_url":
-        return f"已上传 {file_count} 个多模态材料，并以 OSS URL 直接传入多模态模型。"
-    return f"已处理 {file_count} 个多模态材料。"
-
-
 def _image_model_url(file: UploadedFile) -> str | None:
     if file.file_type != "image":
         return None
@@ -1936,7 +1730,7 @@ def _get_current_user_message(
     return conversation, message
 
 
-def _history_for_model(db: Session, *, conversation_id: UUID) -> list[DiagnosisChatMessage]:
+def _history_for_model(db: Session, *, conversation_id: UUID) -> list[DiagnosisContextMessage]:
     messages = db.scalars(
         select(Message)
         .where(
@@ -1949,12 +1743,12 @@ def _history_for_model(db: Session, *, conversation_id: UUID) -> list[DiagnosisC
         .order_by(Message.created_at.asc())
     ).all()
 
-    history: list[DiagnosisChatMessage] = []
-    for message in messages[-20:]:
+    history: list[DiagnosisContextMessage] = []
+    for message in messages[-40:]:
         content = message.content.strip()
         if not content or message.sender_type not in {"user", "assistant"}:
             continue
-        history.append(DiagnosisChatMessage(role=message.sender_type, content=content))
+        history.append(DiagnosisContextMessage(role=message.sender_type, content=content))
     return history
 
 
@@ -1963,7 +1757,7 @@ def _history_for_model_before(
     *,
     conversation_id: UUID,
     before_message: Message,
-) -> list[DiagnosisChatMessage]:
+) -> list[DiagnosisContextMessage]:
     messages = db.scalars(
         select(Message)
         .where(
@@ -1977,12 +1771,12 @@ def _history_for_model_before(
         .order_by(Message.created_at.asc())
     ).all()
 
-    history: list[DiagnosisChatMessage] = []
-    for message in messages[-20:]:
+    history: list[DiagnosisContextMessage] = []
+    for message in messages[-40:]:
         content = message.content.strip()
         if not content or message.sender_type not in {"user", "assistant"}:
             continue
-        history.append(DiagnosisChatMessage(role=message.sender_type, content=content))
+        history.append(DiagnosisContextMessage(role=message.sender_type, content=content))
     return history
 
 
@@ -2118,6 +1912,7 @@ def _message_response(message: Message) -> DiagnosisMessageResponse:
         feedback_reasons=feedback_reasons if isinstance(feedback_reasons, list) else [],
         feedback_detail=feedback_detail if isinstance(feedback_detail, str) else None,
         attachments=[_file_response(message_file.file) for message_file in message.files if message_file.file.deleted_at is None],
+        agent_run=agent_run_from_message_metadata(metadata),
     )
 
 
@@ -2222,20 +2017,6 @@ def _truncate_diagnosis_title(value: str, max_length: int = 28) -> str:
 def _preferences_for_user(db: Session, user: User) -> dict[str, Any]:
     record = db.get(UserSettings, user.id)
     return dict(record.preferences or {}) if record is not None else {}
-
-
-def _diagnosis_system_prompt(user_preferences: dict[str, Any] | None) -> str:
-    preferences = user_preferences or {}
-    source_status: list[str] = []
-    if not preferences.get("knowledge_graph_enabled", True):
-        source_status.append("The user disabled knowledge graph usage. Do not claim graph lookup.")
-    if not preferences.get("rag_enabled", True):
-        source_status.append("The user disabled RAG retrieval. Do not claim external document retrieval.")
-    if not preferences.get("long_term_memory_enabled", True):
-        source_status.append("The user disabled long-term memory. Only use the current conversation context.")
-    if not source_status:
-        source_status.append("KG and RAG are enabled in preferences, but no retrievable source is connected. Do not invent retrieval results.")
-    return f"{SYSTEM_PROMPT}\n\nPreference status: {' '.join(source_status)}"
 
 
 def _title_from_attachments(

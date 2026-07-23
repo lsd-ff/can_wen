@@ -5,7 +5,7 @@ import mimetypes
 import re
 import uuid
 from collections.abc import Iterable
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -71,7 +71,6 @@ from app.schemas.community import (
     CommunityProfileDetailResponse,
     CommunityProfileUpdateRequest,
     CommunityRelationshipListResponse,
-    CommunityReportResponse,
     CommunitySearchResponse,
     CommunityTagResponse,
     CommunityUploadedFileResponse,
@@ -1403,90 +1402,6 @@ def create_community_report(
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="你已举报过该内容，审核结果会通过通知告知") from exc
-
-
-def list_community_reports(
-    db: Session,
-    *,
-    user: User,
-    report_status: str = "pending",
-    limit: int = 50,
-) -> list[CommunityReportResponse]:
-    if user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可查看审核队列")
-    reports = db.scalars(
-        select(CommunityReport)
-        .where(CommunityReport.status == report_status)
-        .order_by(CommunityReport.created_at.desc())
-        .limit(limit)
-    ).all()
-    responses: list[CommunityReportResponse] = []
-    for report in reports:
-        reporter = db.scalar(select(User).where(User.id == report.reporter_id))
-        if reporter is None:
-            continue
-        responses.append(
-            CommunityReportResponse(
-                id=str(report.id),
-                target_type=report.target_type,
-                post_id=str(report.post_id) if report.post_id else None,
-                comment_id=str(report.comment_id) if report.comment_id else None,
-                reason=report.reason,
-                detail=report.detail,
-                status=report.status,
-                reporter=_author_response(db, author=reporter, viewer=user),
-                created_at=report.created_at,
-                reviewed_at=report.reviewed_at,
-            )
-        )
-    return responses
-
-
-def review_community_report(
-    db: Session,
-    *,
-    user: User,
-    report_id: UUID,
-    review_status: str,
-    hide_target: bool,
-) -> CommunityReportResponse:
-    if user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可执行审核")
-    report = db.scalar(select(CommunityReport).where(CommunityReport.id == report_id))
-    if report is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="举报记录不存在")
-    report.status = review_status
-    report.reviewed_at = now_utc()
-    if hide_target:
-        if report.target_type == "post" and report.post_id:
-            target_post = db.scalar(select(CommunityPost).where(CommunityPost.id == report.post_id))
-            if target_post:
-                target_post.status = "hidden"
-                target_post.updated_at = now_utc()
-                db.add(target_post)
-        elif report.comment_id:
-            target_comment = db.scalar(select(CommunityComment).where(CommunityComment.id == report.comment_id))
-            if target_comment:
-                target_comment.status = "hidden"
-                target_comment.updated_at = now_utc()
-                db.add(target_comment)
-    db.add(report)
-    db.commit()
-    reporter = db.scalar(select(User).where(User.id == report.reporter_id))
-    if reporter is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="举报用户不存在")
-    return CommunityReportResponse(
-        id=str(report.id),
-        target_type=report.target_type,
-        post_id=str(report.post_id) if report.post_id else None,
-        comment_id=str(report.comment_id) if report.comment_id else None,
-        reason=report.reason,
-        detail=report.detail,
-        status=report.status,
-        reporter=_author_response(db, author=reporter, viewer=user),
-        created_at=report.created_at,
-        reviewed_at=report.reviewed_at,
-    )
 
 
 def create_community_post_draft_from_conversation(

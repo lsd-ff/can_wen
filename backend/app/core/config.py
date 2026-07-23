@@ -73,6 +73,32 @@ class Settings(BaseSettings):
         default=60.0,
         validation_alias=AliasChoices("CAN_WEN_OPENAI_TIMEOUT_SECONDS", "OPENAI_TIMEOUT_SECONDS"),
     )
+    diagnosis_agent_enabled: bool = True
+    diagnosis_agent_max_retrieval_rounds: int = Field(default=2, ge=1, le=3)
+    diagnosis_agent_dense_top_k: int = Field(default=30, ge=1, le=100)
+    diagnosis_agent_bm25_top_k: int = Field(default=30, ge=1, le=100)
+    diagnosis_agent_fusion_top_k: int = Field(default=20, ge=2, le=100)
+    diagnosis_agent_final_evidence_limit: int = Field(default=8, ge=2, le=30)
+    knowledge_model_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CAN_WEN_KNOWLEDGE_MODEL_API_KEY", "DASHSCOPE_API_KEY"),
+    )
+    knowledge_embedding_base_url: str = "https://dashscope.aliyuncs.com/compatible-api/v1"
+    knowledge_embedding_model_id: str = "text-embedding-v4"
+    knowledge_embedding_dimensions: int = Field(default=1024, ge=1, le=8192)
+    knowledge_rerank_base_url: str = "https://dashscope.aliyuncs.com/compatible-api/v1"
+    knowledge_rerank_model_id: str = "qwen3-rerank"
+    qdrant_url: str = "http://127.0.0.1:6333"
+    qdrant_api_key: str | None = None
+    qdrant_collection: str = "silkworm_qa_v1"
+    opensearch_url: str = "http://127.0.0.1:9200"
+    opensearch_username: str | None = None
+    opensearch_password: str | None = None
+    opensearch_index: str = "silkworm_qa_v1"
+    neo4j_uri: str = ""
+    neo4j_user: str = ""
+    neo4j_password: str = ""
+    neo4j_database: str = ""
     voice_transcription_max_bytes: int = Field(
         default=20 * 1024 * 1024,
         validation_alias=AliasChoices("CAN_WEN_VOICE_TRANSCRIPTION_MAX_BYTES", "VOICE_TRANSCRIPTION_MAX_BYTES"),
@@ -89,6 +115,12 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:5174",
         validation_alias=AliasChoices("CAN_WEN_PUBLIC_FRONTEND_BASE_URL", "PUBLIC_FRONTEND_BASE_URL"),
     )
+
+    def require_neo4j_aura(self) -> None:
+        if not all((self.neo4j_uri, self.neo4j_user, self.neo4j_password, self.neo4j_database)):
+            raise RuntimeError("Neo4j Aura 连接配置未完成")
+        if not self.neo4j_uri.lower().startswith("neo4j+s://"):
+            raise RuntimeError("用户端 KG 检索仅允许连接 Neo4j Aura")
 
     model_config = SettingsConfigDict(
         env_file=".env",

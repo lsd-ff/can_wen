@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import {
   Activity,
   ArrowUpRight,
@@ -53,6 +53,9 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react';
+
+const KnowledgeConsole = lazy(() => import('./features/knowledge/KnowledgeConsole').then((module) => ({ default: module.KnowledgeConsole })));
+const ModelsConsole = lazy(() => import('./features/models/ModelsConsole').then((module) => ({ default: module.ModelsConsole })));
 
 const API_BASE = import.meta.env.VITE_ADMIN_API_BASE_URL ?? 'http://127.0.0.1:8020/api/admin/v1';
 const SESSION_KEY = 'canw-admin-session-v1';
@@ -154,7 +157,7 @@ async function refreshAccessToken(session: AdminSession): Promise<AdminSession> 
 async function api<T>(path: string, session: AdminSession | null, options: RequestInit = {}): Promise<T> {
   const request = (accessToken: string | null) => {
     const headers = new Headers(options.headers);
-    if (options.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
+    if (options.body && !(options.body instanceof FormData) && !headers.has('content-type')) headers.set('content-type', 'application/json');
     if (accessToken) headers.set('authorization', `Bearer ${accessToken}`);
     return fetch(`${API_BASE}${path}`, { ...options, headers });
   };
@@ -387,7 +390,7 @@ function initialPage(session: AdminSession): PageKey {
 
 function AdminShell({ session, onLogout, onToast, toast }: { session: AdminSession; onLogout: () => void; onToast: (message: string) => void; toast: string }) {
   const [page, setPage] = useState<PageKey>(() => initialPage(session));
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => window.matchMedia('(max-width: 820px)').matches);
   const [search, setSearch] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -395,7 +398,7 @@ function AdminShell({ session, onLogout, onToast, toast }: { session: AdminSessi
   const notificationResource = useResource<Row>(session, '/dashboard', hasPermission(session, 'dashboard.read'));
   const notifications = Array.isArray(notificationResource.data?.alerts) ? notificationResource.data.alerts as Row[] : [];
   const meta = useMemo(() => navigation.flatMap((section) => section.items).find((item) => item.key === page), [page]);
-  const navigate = (next: PageKey) => { window.location.hash = `/${next}`; setPage(next); setSearchOpen(false); };
+  const navigate = (next: PageKey) => { window.location.hash = `/${next}`; setPage(next); setSearchOpen(false); if (window.matchMedia('(max-width: 820px)').matches) setCollapsed(true); };
 
   useEffect(() => {
     const syncPage = () => setPage(initialPage(session));
@@ -408,12 +411,19 @@ function AdminShell({ session, onLogout, onToast, toast }: { session: AdminSessi
     return () => window.clearInterval(timer);
   }, [notificationResource.reload]);
 
+  useEffect(() => {
+    const compactViewport = window.matchMedia('(max-width: 820px)');
+    const closeDrawer = (event: MediaQueryListEvent) => { if (event.matches) setCollapsed(true); };
+    compactViewport.addEventListener('change', closeDrawer);
+    return () => compactViewport.removeEventListener('change', closeDrawer);
+  }, []);
+
   return (
     <div className={`admin-shell ${collapsed ? 'sidebar-collapsed' : ''}`}>
       <aside className="sidebar">
         <div className="sidebar-brand">
           <div className="brand-copy"><strong>CanW</strong><span>管理工作台</span></div>
-          <button aria-label="折叠导航" onClick={() => setCollapsed((value) => !value)}>
+          <button aria-label={collapsed ? '展开导航' : '折叠导航'} onClick={() => setCollapsed((value) => !value)}>
             {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
           </button>
         </div>
@@ -431,9 +441,10 @@ function AdminShell({ session, onLogout, onToast, toast }: { session: AdminSessi
         </nav>
         <div className="sidebar-footer"><span className="status-dot" /><small>已启用审计保护</small></div>
       </aside>
+      <button type="button" className="sidebar-backdrop" aria-label="关闭导航" onClick={() => setCollapsed(true)} />
       <main className="admin-main">
         <header className="topbar">
-          <div className="mobile-menu"><button onClick={() => setCollapsed((value) => !value)}><Menu size={20} /></button></div>
+          <div className="mobile-menu"><button aria-label={collapsed ? '打开导航' : '关闭导航'} aria-expanded={!collapsed} onClick={() => setCollapsed((value) => !value)}><Menu size={20} /></button></div>
           <div><span className="topbar-kicker">CANW / {meta?.label ?? '工作台'}</span><h1>{meta?.label ?? '管理工作台'}</h1></div>
           <div className="topbar-actions">
             {page !== 'dashboard' && <div className="global-search"><Search size={16} /><input value={search} onFocus={() => setSearchOpen(true)} onChange={(event) => setSearch(event.target.value)} placeholder="搜索用户、问诊、帖子…" />
@@ -522,30 +533,6 @@ function DashboardPage({ session }: { session: AdminSession }) {
 
 function QueuePage({ session, onToast }: { session: AdminSession; onToast: (message: string) => void }) {
   return <QueueWorkspace session={session} onToast={onToast} />;
-
-  const [filter, setFilter] = useState(() => {
-    const initial = hashQuery('status');
-    return ['open', 'claimed', 'completed', 'active', 'all'].includes(initial) ? initial : 'open';
-  });
-  const path = filter === 'claimed' ? '/work-items?status=claimed&assignee=me' : `/work-items?status=${filter}`;
-  const resource = useResource<ListResponse>(session, path);
-  const goToBusiness = (item: Row) => {
-    const destination: Record<string, PageKey> = { community_report: 'community', community_profile: 'community', husbandry_case: 'husbandry', diagnosis_conversation: 'diagnosis' };
-    const page = destination[text(item.resource_type)];
-    if (page) window.location.hash = `/${page}`;
-    else onToast('该待办暂未配置业务处理页面');
-  };
-  const change = async (item: Row, action: string) => {
-    const reason = action === 'claim' ? '领取待办处理' : await askReasonInDialog(action === 'complete' ? '完成待办' : '释放待办');
-    if (!reason) return;
-    try {
-      await api(`/work-items/${text(item.id)}`, session, { method: 'PATCH', body: JSON.stringify({ action, version: number(item.version), reason }) });
-      onToast('待办状态已更新');
-      if (action === 'claim') goToBusiness(item);
-      else resource.reload();
-    } catch (error) { onToast(error instanceof Error ? error.message : '操作失败'); }
-  };
-  return <><PageHeader eyebrow="任务分派" title="待办中心" description="领取后前往对应业务页面处理；业务审核完成时待办会自动闭环并保留审计记录。" actions={<div className="segmented">{['open', 'claimed', 'active', 'completed'].map((value) => <button className={filter === value ? 'active' : ''} onClick={() => setFilter(value)} key={value}>{value === 'open' ? '待领取' : value === 'claimed' ? '我处理中' : value === 'active' ? '全部进行中' : '已完成'}</button>)}</div>} /><LoadingState loading={resource.loading} error={resource.error}><article className="panel full-panel"><SimpleTable columns={['事项', '优先级', '负责人', '截止时间', '操作']} rows={asItems(resource.data)} render={(item) => [<div key="title"><strong>{text(item.title)}</strong><small>{text(item.item_type)} · {text(item.resource_id)}</small></div>, <Status key="priority" value={text(item.priority)} />, text(item.assignee_id) === session.admin.id ? '我' : text(item.assignee_id, '未领取'), dateTime(item.due_at), <div className="row-actions" key="actions">{text(item.status) === 'open' && <button onClick={() => void change(item, 'claim')}>领取并处理</button>}{text(item.status) === 'claimed' && <><button onClick={() => goToBusiness(item)}>前往处理</button><button className="quiet" onClick={() => void change(item, 'release')}>释放</button></>}{text(item.status) === 'completed' && <button className="quiet" onClick={() => goToBusiness(item)}>查看业务</button>}</div>]} empty="没有符合筛选条件的待办" /></article></LoadingState></>;
 }
 
 function QueueWorkspace({ session, onToast }: { session: AdminSession; onToast: (message: string) => void }) {
@@ -927,26 +914,6 @@ function userActionLabel(value: string): string {
   return ({ user_disabled: '禁用账号', user_active: '恢复账号', user_sessions_revoked: '撤销登录会话' }[value] ?? value);
 }
 
-function LegacyCommunityPage({ session, onToast }: { session: AdminSession; onToast: (message: string) => void }) {
-  const [tab, setTab] = useState<'reports' | 'verifications' | 'posts' | 'tags'>(() => {
-    const initial = hashQuery('tab');
-    return ['reports', 'verifications', 'posts', 'tags'].includes(initial) ? initial as 'reports' | 'verifications' | 'posts' | 'tags' : 'reports';
-  });
-  const reportId = hashQuery('report_id'); const verificationUserId = hashQuery('user_id');
-  const paths = { reports: `/community/reports?status=pending${reportId ? `&id=${encodeURIComponent(reportId)}` : ''}`, verifications: `/community/verifications?status=pending${verificationUserId ? `&user_id=${encodeURIComponent(verificationUserId)}` : ''}`, posts: '/community/content/posts', tags: '/community/tags' };
-  const resource = useResource<ListResponse>(session, paths[tab]);
-  const renameTag = async (_item: Row) => { onToast('请使用新的标签治理工作台完成重命名'); };
-  const mergeTag = async (_item: Row) => { onToast('请使用新的标签治理工作台完成合并'); };
-  const reviewReport = async (item: Row, action: 'none' | 'hide' | 'restore' | 'warn' | 'disable_author') => { const reason = await askReasonInDialog('处理社区举报'); if (!reason) return; try { await api(`/community/reports/${text(item.id)}`, session, { method: 'PATCH', body: JSON.stringify({ status: action === 'none' ? 'dismissed' : 'reviewed', action, version: Math.max(1, number(item.version)), reason }) }); onToast('举报已处理'); resource.reload(); } catch (error) { onToast(error instanceof Error ? error.message : '操作失败'); } };
-  const reviewVerification = async (item: Row, verificationStatus: 'verified' | 'rejected') => { const reason = await askReasonInDialog(verificationStatus === 'verified' ? '通过专业认证' : '驳回专业认证'); if (!reason) return; try { await api(`/community/verifications/${text(item.user_id)}`, session, { method: 'PATCH', body: JSON.stringify({ status: verificationStatus, version: Math.max(1, number(item.verification_version)), reason }) }); onToast('认证状态已更新'); resource.reload(); } catch (error) { onToast(error instanceof Error ? error.message : '操作失败'); } };
-  const updatePost = async (item: Row, postStatus: 'published' | 'hidden' | 'deleted') => { const reason = await askReasonInDialog(postStatus === 'hidden' ? '隐藏帖子' : '更新帖子状态'); if (!reason) return; try { await api(`/community/content/posts/${text(item.id)}/status`, session, { method: 'PATCH', body: JSON.stringify({ status: postStatus, version: Math.max(1, number(item.moderation_version)), reason }) }); onToast('内容状态已更新'); resource.reload(); } catch (error) { onToast(error instanceof Error ? error.message : '操作失败'); } };
-  return <><PageHeader eyebrow="内容与信任" title="社区审核" description="举报、认证和内容处置共享同一条可追溯审核链路。" actions={<Tabs current={tab} onChange={setTab} values={[['reports', '举报队列'], ['verifications', '专业认证'], ['posts', '内容管理'], ['tags', '标签']]} />} /><article className="panel full-panel"><LoadingState loading={resource.loading} error={resource.error}>{tab === 'reports' && <SimpleTable columns={['举报原因', '目标内容', '提交人', '状态', '处置']} rows={asItems(resource.data)} render={(item) => [<div key="reason"><strong>{text(item.reason)}</strong><small>{text(item.detail)}</small></div>, <div key="target"><strong>{text(item.target_summary)}</strong><small>{text(item.target_type)} · {text(item.target_status)}</small></div>, text(item.reporter_name), <Status key="status" value={text(item.status)} />, <div className="row-actions" key="action"><button onClick={() => void reviewReport(item, 'hide')}>隐藏</button><button onClick={() => void reviewReport(item, 'none')}>驳回</button><button className="danger" onClick={() => void reviewReport(item, 'disable_author')}>禁用作者</button></div>]} empty="没有待处理举报" />}{tab === 'verifications' && <SimpleTable columns={['申请人', '身份资料', '状态', '提交时间', '处置']} rows={asItems(resource.data)} render={(item) => [<div key="name"><strong>{text(item.display_name)}</strong><small>{text(item.user_status)}</small></div>, <div key="profile"><strong>{text(item.identity_type)}</strong><small>{text(item.organization)} · {text(item.region)}</small></div>, <Status key="status" value={text(item.verification_status)} />, dateTime(item.updated_at), <div className="row-actions" key="action"><button onClick={() => void reviewVerification(item, 'verified')}>通过</button><button className="quiet" onClick={() => void reviewVerification(item, 'rejected')}>驳回</button></div>]} empty="没有待审核的专业资料" />}{tab === 'posts' && <SimpleTable columns={['帖子', '作者', '类型', '互动', '状态', '处置']} rows={asItems(resource.data)} render={(item) => [<div key="title"><strong>{text(item.title)}</strong><small>{text(item.excerpt)}</small></div>, text(item.author_name), text(item.post_type), `${number(item.like_count)} 赞 · ${number(item.comment_count)} 评`, <Status key="status" value={text(item.status)} />, <div className="row-actions" key="action"><button onClick={() => void updatePost(item, 'hidden')}>隐藏</button><button className="quiet" onClick={() => void updatePost(item, 'published')}>恢复</button></div>]} empty="没有社区内容" />}{tab === 'tags' && <SimpleTable columns={['标签', '关联帖子', '创建时间', '治理']} rows={asItems(resource.data)} render={(item) => [<strong key="name">#{text(item.name)}</strong>, number(item.post_count).toLocaleString('zh-CN'), dateTime(item.created_at), <div className="row-actions" key="action"><button onClick={() => void renameTag(item)}>重命名</button><button className="quiet" onClick={() => void mergeTag(item)}>合并</button></div>]} empty="暂无标签" />}</LoadingState></article></>;
-}
-
-type CommunitySelection = { kind: 'report' | 'verification' | 'post'; id: string };
-type TagGovernanceRequest = { mode: 'rename' | 'merge'; tag: Row };
-type CommunityTab = 'reports' | 'verifications' | 'posts' | 'tags';
-type CommunityQueueTab = Exclude<CommunityTab, 'tags'>;
 
 function CommunityPage({ session, onToast }: { session: AdminSession; onToast: (message: string) => void }) {
   const [tab, setTab] = useState<CommunityTab>(() => {
@@ -1251,18 +1218,21 @@ function HusbandryDetail({ detail, canReview, onGrant, onQueue, onSubmit }: { de
 }
 
 function KnowledgePage({ session, onToast }: { session: AdminSession; onToast: (message: string) => void }) {
-  void session;
-  void onToast;
-  return <><PageHeader eyebrow="能力规划" title="知识中心暂未启用" description="真实 RAG、知识图谱、诊断证据链与长期记忆已明确延期；在能力落地前，管理端不会创建或索引任何知识源。" /><article className="panel full-panel"><EmptySelection text="知识源管理将在真实检索、版本治理和引用链路一并完成后开放。" /></article></>;
+  const request = useCallback(
+    (path: string, options?: RequestInit) => api<unknown>(path, session, options),
+    [session.access_token],
+  );
+  return <Suspense fallback={<div className="loading-state">正在加载知识构建工作台…</div>}><KnowledgeConsole request={request} onToast={onToast} canManage={hasPermission(session, 'knowledge.manage')} /></Suspense>;
 }
 
 function ModelsPage({ session, onToast }: { session: AdminSession; onToast: (message: string) => void }) {
-  const [tab, setTab] = useState<'models' | 'jobs'>(() => hashQuery('tab') === 'jobs' ? 'jobs' : 'models'); const [open, setOpen] = useState(false); const resource = useResource<ListResponse>(session, tab === 'models' ? '/models' : '/jobs');
-  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api('/models', session, { method: 'POST', body: JSON.stringify({ key: form.get('key'), label: form.get('label'), model_id: form.get('model_id'), api_base_url: form.get('api_base_url'), api_key: form.get('api_key') || null, capability: form.get('capability'), enabled: true, reason: form.get('reason') }) }); setOpen(false); onToast('平台级模型已保存，密钥不会回显'); resource.reload(); } catch (error) { onToast(error instanceof Error ? error.message : '保存失败'); } };
-  const patchJob = async (item: Row, action: 'retry' | 'cancel') => { const reason = await askReasonInDialog(action === 'retry' ? '重试任务' : '取消任务'); if (!reason) return; try { await api(`/jobs/${text(item.id)}`, session, { method: 'PATCH', body: JSON.stringify({ action, reason }) }); onToast('任务状态已更新'); resource.reload(); } catch (error) { onToast(error instanceof Error ? error.message : '操作失败'); } };
-  const testModel = async (item: Row) => { const reason = await askReasonInDialog('测试系统模型连通性'); if (!reason) return; try { const result = await api<Row>(`/models/${text(item.id)}/test`, session, { method: 'POST', body: JSON.stringify({ reason }) }); onToast(text(result.last_test_status) === 'passed' ? '模型接口连通' : `模型测试失败：${text(result.last_test_message)}`); resource.reload(); } catch (error) { onToast(error instanceof Error ? error.message : '模型测试失败'); } };
-  return <><PageHeader eyebrow="平台能力" title="模型与任务" description="系统模型与异步任务与用户自定义模型隔离，管理端不会读取用户 API Key。" actions={<Tabs current={tab} onChange={setTab} values={[['models', '系统模型'], ['jobs', '后台任务']]} />} />{tab === 'models' && <button className="primary-button page-float-action" onClick={() => setOpen(true)}><Plus size={16} />添加系统模型</button>}<article className="panel full-panel"><LoadingState loading={resource.loading} error={resource.error}>{tab === 'models' ? <SimpleTable columns={['名称', '模型 ID', '能力', '密钥', '状态', '最近测试', '操作']} rows={asItems(resource.data)} render={(item) => [<div key="label"><strong>{text(item.label)}</strong><small>{text(item.key)}</small></div>, text(item.model_id), text(item.capability), item.has_api_key ? '已配置' : '未配置', <Status key="status" value={item.enabled ? 'enabled' : 'disabled'} />, text(item.last_test_status), <button key="test" onClick={() => void testModel(item)}>测试</button>]} empty="尚未配置平台级模型" /> : <SimpleTable columns={['任务', '状态', '进度', '错误', '操作']} rows={asItems(resource.data)} render={(item) => [text(item.job_type), <Status key="status" value={text(item.status)} />, `${number(item.progress)}%`, text(item.error_message), <div className="row-actions" key="action">{text(item.status) === 'failed' && <button onClick={() => void patchJob(item, 'retry')}>重试</button>}{['queued', 'running'].includes(text(item.status)) && <button className="danger" onClick={() => void patchJob(item, 'cancel')}>取消</button>}</div>]} empty="没有后台任务" />}</LoadingState></article>{open && <Modal title="添加系统模型" onClose={() => setOpen(false)}><form className="form-grid" onSubmit={submit}><label>内部标识<input name="key" required placeholder="vision-primary" /></label><label>显示名称<input name="label" required /></label><label>模型 ID<input name="model_id" required /></label><label>API 地址<input name="api_base_url" required type="url" /></label><label>能力<select name="capability"><option value="chat">对话</option><option value="vision">视觉</option><option value="embedding">嵌入</option><option value="speech">语音</option></select></label><label>API Key（仅写入）<input name="api_key" type="password" /></label><label>保存理由<input name="reason" required minLength={3} /></label><button className="primary-button">保存模型</button></form></Modal>}</>;
+  const request = useCallback(
+    (path: string, options?: RequestInit) => api<unknown>(path, session, options),
+    [session.access_token],
+  );
+  return <Suspense fallback={<div className="loading-state">正在加载模型控制台…</div>}><ModelsConsole request={request} onToast={onToast} canManage={hasPermission(session, 'models.manage')} /></Suspense>;
 }
+
 
 function OperationsPage({ session, onToast }: { session: AdminSession; onToast: (message: string) => void }) {
   const [tab, setTab] = useState<'analytics' | 'assets' | 'risk' | 'health'>(() => {
@@ -1868,7 +1838,6 @@ function Status({ value }: { value: string }) { const label: Record<string, stri
 function PanelTitle({ icon: Icon, title, note }: { icon: LucideIcon; title: string; note: string }) { return <header className="panel-title"><div><Icon size={17} /><h3>{title}</h3></div><small>{note}</small></header>; }
 function EmptySelection({ text: message }: { text: string }) { return <div className="empty-selection"><MoreHorizontal size={25} /><p>{message}</p></div>; }
 function Timeline({ rows, label }: { rows: Row[]; label: (row: Row) => string }) { return <div className="timeline">{rows.length ? rows.map((row, index) => <div key={`${text(row.id, String(index))}-${index}`}><span /><p>{label(row)}</p></div>) : <p className="empty-note">暂无记录</p>}</div>; }
-function SummaryChips({ data }: { data: Row }) { return <div className="summary-chips">{Object.entries(data).map(([key, value]) => <span key={key}><b>{number(value)}</b>{key.replace(/_/g, ' ')}</span>)}</div>; }
 function SimpleTable({ columns, rows, render, empty }: { columns: ReactNode[]; rows: Row[]; render: (row: Row) => ReactNode[]; empty: string }) { return <div className="table-wrap"><table><thead><tr>{columns.map((column, index) => <th key={index}>{column}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={text(row.id, String(index))}>{render(row).map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>)}</tbody></table>{!rows.length && <div className="empty-table"><FileText size={20} />{empty}</div>}</div>; }
 function Pagination({ total, page, pageSize, onChange }: { total: number; page: number; pageSize: number; onChange: (page: number) => void }) {
   const pages = Math.max(1, Math.ceil(total / Math.max(1, pageSize)));

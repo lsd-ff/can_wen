@@ -7,8 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, or_, select
 
-from app.api.routes import diagnosis as diagnosis_route
+from app.agents.diagnosis.types import AgentPublicEvent, DiagnosisAgentResult
 from app.core.config import Settings, get_settings
+from app.core.security import now_utc
 from app.db.session import SessionLocal, check_database_connection
 from app.main import app
 from app.models import (
@@ -24,14 +25,30 @@ from app.models import (
     UserIdentity,
     UploadedFile,
 )
-from app.schemas.diagnosis import DiagnosisChatMessage
 from app.services import diagnosis_service as diagnosis_service_module
-from app.services.diagnosis_service import LLMConfigurationError, generate_diagnosis_reply
+from app.services.diagnosis_agent_service import DiagnosisAgentExecution
 from app.services.llm_client import OpenAICompatibleModelConfig
 
 
 client = TestClient(app)
 TEST_EMAIL = "codex-diagnosis-api@qq.com"
+
+
+def _fake_agent_execution(question: str, *, answer: str | None = None) -> DiagnosisAgentExecution:
+    return DiagnosisAgentExecution(
+        run_id=uuid4(),
+        result=DiagnosisAgentResult(
+            answer=answer or f"智能体回复：{question}",
+            status="completed",
+            route="hybrid",
+            risk_level="low",
+            original_question=question,
+            rewritten_question=question,
+            evidence_status="sufficient",
+            metrics={"test_execution": True},
+        ),
+        events=[],
+    )
 
 
 def test_diagnosis_conversations_require_login() -> None:
@@ -41,28 +58,10 @@ def test_diagnosis_conversations_require_login() -> None:
     assert response.json() == {"detail": "请先登录"}
 
 
-def test_diagnosis_chat_returns_model_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_generate_diagnosis_reply(
-        settings: Settings,
-        *,
-        message: str,
-        history: list[DiagnosisChatMessage],
-    ) -> str:
-        assert settings.openai_model_id
-        assert message == "五龄蚕发白变硬怎么办？"
-        assert history == []
-        return "建议先隔离异常蚕，并补充蚕龄、死亡比例和环境湿度。"
+def test_legacy_direct_model_chat_is_not_exposed() -> None:
+    paths = client.get("/openapi.json").json()["paths"]
 
-    monkeypatch.setattr(diagnosis_route, "generate_diagnosis_reply", fake_generate_diagnosis_reply)
-
-    response = client.post(
-        "/api/v1/diagnosis/chat",
-        json={"message": "五龄蚕发白变硬怎么办？", "history": []},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["reply"] == "建议先隔离异常蚕，并补充蚕龄、死亡比例和环境湿度。"
-    assert response.json()["provider"] == "openai-compatible"
+    assert "/api/v1/diagnosis/chat" not in paths
 
 
 def test_diagnosis_title_uses_a_concise_question_summary() -> None:
@@ -72,15 +71,7 @@ def test_diagnosis_title_uses_a_concise_question_summary() -> None:
     assert diagnosis_service_module._is_placeholder_diagnosis_title("新问诊")
 
 
-def test_diagnosis_system_prompt_requests_rich_markdown() -> None:
-    prompt = diagnosis_service_module._diagnosis_system_prompt({})
-
-    assert "Markdown" in prompt
-    assert "不要输出 JSON" in prompt
-    assert "## 二级标题" in prompt
-
-
-def test_docx_attachment_context_is_ready_for_direct_model_input() -> None:
+def test_docx_attachment_context_is_ready_for_multimodal_observation_extraction() -> None:
     docx_buffer = io.BytesIO()
     with zipfile.ZipFile(docx_buffer, "w") as archive:
         archive.writestr(
@@ -159,56 +150,6 @@ def test_multimodal_analysis_messages_include_document_text_and_inline_image() -
     assert user_content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
 
-def test_generate_diagnosis_reply_posts_openai_compatible_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
-
-    class FakeResponse:
-        def __enter__(self) -> "FakeResponse":
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return json.dumps({"choices": [{"message": {"content": "模型回复"}}]}).encode("utf-8")
-
-    def fake_urlopen(request, timeout: float) -> FakeResponse:
-        captured["url"] = request.full_url
-        captured["timeout"] = timeout
-        captured["headers"] = dict(request.header_items())
-        captured["payload"] = json.loads(request.data.decode("utf-8"))
-        return FakeResponse()
-
-    monkeypatch.setattr("app.services.llm_client.urlopen", fake_urlopen)
-    settings = Settings(
-        openai_api_key="test-key",
-        openai_base_url="https://example.test/v1",
-        openai_model_id="gpt-5-nano",
-        openai_timeout_seconds=12,
-    )
-
-    reply = generate_diagnosis_reply(
-        settings,
-        message="蚕不吃桑叶",
-        history=[DiagnosisChatMessage(role="assistant", content="请补充蚕龄。")],
-    )
-
-    assert reply == "模型回复"
-    assert captured["url"] == "https://example.test/v1/chat/completions"
-    assert captured["timeout"] == 12
-    assert captured["headers"]["Authorization"] == "Bearer test-key"
-    assert captured["payload"]["model"] == "gpt-5-nano"
-    assert captured["payload"]["messages"][0]["role"] == "system"
-    assert captured["payload"]["messages"][-1] == {"role": "user", "content": "蚕不吃桑叶"}
-
-
-def test_generate_diagnosis_reply_requires_api_key() -> None:
-    settings = Settings(openai_api_key=None)
-
-    with pytest.raises(LLMConfigurationError):
-        generate_diagnosis_reply(settings, message="蚕不吃桑叶", history=[])
-
-
 @pytest.mark.skipif(not check_database_connection(), reason="database is not available")
 def test_persistent_diagnosis_conversation_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     _cleanup_identity_auth_data("email", TEST_EMAIL)
@@ -218,19 +159,12 @@ def test_persistent_diagnosis_conversation_flow(monkeypatch: pytest.MonkeyPatch)
 
     calls: list[tuple[str, int]] = []
 
-    def fake_generate_diagnosis_reply(
-        settings: Settings,
-        *,
-        message: str,
-        history: list[DiagnosisChatMessage],
-        model_config: OpenAICompatibleModelConfig | None = None,
-        user_preferences: dict | None = None,
-    ) -> str:
+    def fake_execute_diagnosis_agent(*args, original_question: str, history: list, model_config, **kwargs):
         assert model_config is not None
-        calls.append((message, len(history)))
-        return f"模型回复：{message}"
+        calls.append((original_question, len(history)))
+        return _fake_agent_execution(original_question)
 
-    monkeypatch.setattr("app.services.diagnosis_service.generate_diagnosis_reply", fake_generate_diagnosis_reply)
+    monkeypatch.setattr("app.services.diagnosis_service.execute_diagnosis_agent", fake_execute_diagnosis_agent)
     monkeypatch.setattr(
         "app.services.diagnosis_service.resolve_current_user_llm_config",
         lambda *args, **kwargs: OpenAICompatibleModelConfig(
@@ -258,7 +192,9 @@ def test_persistent_diagnosis_conversation_flow(monkeypatch: pytest.MonkeyPatch)
         assert created_turn["conversation"]["title"].startswith("五龄蚕发白变硬")
         assert created_turn["user_message"]["role"] == "user"
         assert created_turn["assistant_message"]["role"] == "assistant"
-        assert created_turn["assistant_message"]["content"] == "模型回复：五龄蚕发白变硬怎么办？"
+        assert created_turn["assistant_message"]["content"] == "智能体回复：五龄蚕发白变硬怎么办？"
+        assert created_turn["agent_run"]["route"] == "hybrid"
+        assert created_turn["assistant_message"]["agent_run"]["evidence_status"] == "sufficient"
         assert calls == [("五龄蚕发白变硬怎么办？", 0)]
 
         list_response = client.get("/api/v1/diagnosis/conversations", headers=auth_headers)
@@ -338,7 +274,7 @@ def test_persistent_diagnosis_conversation_flow(monkeypatch: pytest.MonkeyPatch)
         )
 
         assert append_response.status_code == 200
-        assert append_response.json()["assistant_message"]["content"] == "模型回复：需要怎么消毒？"
+        assert append_response.json()["assistant_message"]["content"] == "智能体回复：需要怎么消毒？"
         assert calls[-1] == ("需要怎么消毒？", 2)
 
         with SessionLocal() as db:
@@ -433,7 +369,7 @@ def test_persistent_diagnosis_conversation_flow(monkeypatch: pytest.MonkeyPatch)
         )
 
         assert regenerate_response.status_code == 200
-        assert regenerate_response.json()["message"]["content"] == "模型回复：需要如何清理蚕座？"
+        assert regenerate_response.json()["message"]["content"] == "智能体回复：需要如何清理蚕座？"
         assert regenerate_response.json()["message"]["feedback"] is None
         assert calls[-1] == ("需要如何清理蚕座？", 2)
 
@@ -480,6 +416,96 @@ def test_persistent_diagnosis_conversation_flow(monkeypatch: pytest.MonkeyPatch)
     finally:
         app.dependency_overrides.pop(get_settings, None)
         _cleanup_identity_auth_data("email", TEST_EMAIL)
+
+
+@pytest.mark.skipif(not check_database_connection(), reason="database is not available")
+def test_streaming_diagnosis_turn_emits_public_process_before_final(monkeypatch: pytest.MonkeyPatch) -> None:
+    email = "codex-diagnosis-stream@qq.com"
+    _cleanup_identity_auth_data("email", email)
+
+    def fake_settings() -> Settings:
+        return Settings(
+            openai_api_key="test-key",
+            openai_base_url="https://example.test/v1",
+            openai_model_id="gpt-5-nano",
+        )
+
+    monkeypatch.setattr(
+        "app.services.diagnosis_service.resolve_current_user_llm_config",
+        lambda *args, **kwargs: OpenAICompatibleModelConfig(
+            provider_name="Environment",
+            model_id="gpt-5-nano",
+            api_key="test-key",
+            api_request_url="https://example.test/v1",
+        ),
+    )
+
+    def fake_execute(*args, original_question: str, event_callback=None, **kwargs):
+        execution = _fake_agent_execution(original_question)
+        if event_callback is not None:
+            event_callback(
+                AgentPublicEvent(
+                    run_id=str(execution.run_id),
+                    sequence=1,
+                    agent="agent1_context_router",
+                    stage="route",
+                    status="completed",
+                    title="问题理解与路由完成",
+                    summary="已选择 RAG + KG 联合检索。",
+                    payload={"route": "hybrid", "risk_level": "low"},
+                    created_at=now_utc(),
+                )
+            )
+        return execution
+
+    monkeypatch.setattr("app.services.diagnosis_service.execute_diagnosis_agent", fake_execute)
+    app.dependency_overrides[get_settings] = fake_settings
+
+    try:
+        login_payload = _login_with_email_dev_code(email)
+        auth_headers = {"Authorization": f"Bearer {login_payload['access_token']}"}
+        response = client.post(
+            "/api/v1/diagnosis/conversations/stream",
+            headers=auth_headers,
+            json={"message": "五龄蚕发白变硬怎么办？"},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        blocks = [block for block in response.text.split("\n\n") if block.strip()]
+        event_names = [
+            next(line.removeprefix("event: ") for line in block.splitlines() if line.startswith("event: "))
+            for block in blocks
+        ]
+        assert event_names == ["ready", "process", "final"]
+        process_payload = json.loads(
+            next(line.removeprefix("data: ") for line in blocks[1].splitlines() if line.startswith("data: "))
+        )
+        final_payload = json.loads(
+            next(line.removeprefix("data: ") for line in blocks[2].splitlines() if line.startswith("data: "))
+        )
+        assert process_payload["agent"] == "agent1_context_router"
+        assert process_payload["payload"]["route"] == "hybrid"
+        assert final_payload["assistant_message"]["content"] == "智能体回复：五龄蚕发白变硬怎么办？"
+        assert final_payload["agent_run"]["route"] == "hybrid"
+
+        conversation_id = final_payload["conversation"]["id"]
+        assistant_message_id = final_payload["assistant_message"]["id"]
+        regenerate_response = client.post(
+            f"/api/v1/diagnosis/conversations/{conversation_id}/messages/{assistant_message_id}/regenerate/stream",
+            headers=auth_headers,
+            json={},
+        )
+        assert regenerate_response.status_code == 200
+        regenerate_events = [
+            next(line.removeprefix("event: ") for line in block.splitlines() if line.startswith("event: "))
+            for block in regenerate_response.text.split("\n\n")
+            if block.strip()
+        ]
+        assert regenerate_events == ["ready", "process", "final"]
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+        _cleanup_identity_auth_data("email", email)
 
 
 @pytest.mark.skipif(not check_database_connection(), reason="database is not available")
@@ -573,32 +599,35 @@ def test_multimodal_diagnosis_upload_persists_analysis(monkeypatch: pytest.Monke
         lambda *, object_key, content, content_type, failure_detail="文件上传失败，请稍后再试": f"https://oss.test/{object_key}",
     )
 
-    def fake_generate_diagnosis_reply_with_direct_materials(
+    def fake_analyze_multimodal_materials(
         settings: Settings,
         *,
         message: str,
-        history: list[DiagnosisChatMessage],
         files: list,
         structured_data: dict,
         model_config: OpenAICompatibleModelConfig,
-        user_preferences: dict | None = None,
-    ) -> tuple[str, dict, str]:
+    ) -> tuple[dict, str]:
         assert model_config.model_id == "gpt-5-nano"
         assert message == "帮我看一下这张蚕病图片"
-        assert history == []
         assert len(files) == 1
         assert files[0].file_name == "symptom.jpg"
         assert files[0].file_type == "image"
         assert structured_data == {"silkworm_age": "五龄"}
         return (
-            "已根据图片解析结果生成问诊回复。",
-            {"mode": "direct_url", "fallback_used": False, "file_contexts": [{"file_type": "image"}]},
-            "已上传 1 个多模态材料，并以 OSS URL 直接传入多模态模型。",
+            {"mode": "multimodal_analysis", "fallback_used": False, "file_contexts": [{"file_type": "image"}]},
+            "已解析 1 个多模态材料，提取结果将作为检索查询上下文。",
         )
 
     monkeypatch.setattr(
-        "app.services.diagnosis_service.generate_diagnosis_reply_with_direct_materials",
-        fake_generate_diagnosis_reply_with_direct_materials,
+        "app.services.diagnosis_service.analyze_multimodal_materials",
+        fake_analyze_multimodal_materials,
+    )
+    monkeypatch.setattr(
+        "app.services.diagnosis_service.execute_diagnosis_agent",
+        lambda *args, original_question, **kwargs: _fake_agent_execution(
+            original_question,
+            answer="已根据图片解析和知识证据生成问诊回复。",
+        ),
     )
     app.dependency_overrides[get_settings] = fake_settings
 
@@ -622,7 +651,8 @@ def test_multimodal_diagnosis_upload_persists_analysis(monkeypatch: pytest.Monke
         assert payload["user_message"]["attachments"][0]["file_name"] == "symptom.jpg"
         assert payload["user_message"]["attachments"][0]["file_type"] == "image"
         assert payload["user_message"]["attachments"][0]["storage_url"].startswith("https://oss.test/")
-        assert payload["assistant_message"]["content"] == "已根据图片解析结果生成问诊回复。"
+        assert payload["assistant_message"]["content"] == "已根据图片解析和知识证据生成问诊回复。"
+        assert payload["agent_run"]["route"] == "hybrid"
 
         with SessionLocal() as db:
             analysis = db.scalar(
@@ -630,8 +660,8 @@ def test_multimodal_diagnosis_upload_persists_analysis(monkeypatch: pytest.Monke
             )
             assert analysis is not None
             assert analysis.status == "completed"
-            assert analysis.analysis_json["mode"] == "direct_url"
-            assert analysis.analysis_text == "已上传 1 个多模态材料，并以 OSS URL 直接传入多模态模型。"
+            assert analysis.analysis_json["mode"] == "multimodal_analysis"
+            assert analysis.analysis_text == "已解析 1 个多模态材料，提取结果将作为检索查询上下文。"
             assert len(analysis.file_ids) == 1
     finally:
         app.dependency_overrides.pop(get_settings, None)

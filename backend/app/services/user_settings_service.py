@@ -58,8 +58,8 @@ from app.services.storage_service import delete_object_file, is_storage_configur
 DEFAULT_USER_PREFERENCES: dict[str, Any] = {
     "knowledge_graph_enabled": True,
     "rag_enabled": True,
-    "long_term_memory_enabled": True,
-    "memory_agent_write_enabled": True,
+    "long_term_memory_enabled": False,
+    "memory_agent_write_enabled": False,
     "in_app_notifications": True,
     "upload_notifications": True,
     "model_notifications": True,
@@ -194,7 +194,6 @@ def export_current_user_data(db: Session, *, access_token: str) -> dict[str, Any
     cases = list(db.scalars(select(HusbandryCase).where(HusbandryCase.owner_id == user.id).order_by(desc(HusbandryCase.updated_at))))
     posts = list(db.scalars(select(CommunityPost).where(CommunityPost.author_id == user.id).order_by(desc(CommunityPost.updated_at))))
 
-    project_ids = [project.id for project in projects]
     conversation_ids = [conversation.id for conversation in conversations]
     farm_ids = [farm.id for farm in farms]
     case_ids = [case.id for case in cases]
@@ -351,7 +350,12 @@ def _ensure_settings_record(db: Session, user: User) -> UserSettings:
 
 
 def _merged_preferences(preferences: dict[str, Any] | None) -> dict[str, Any]:
-    return {**DEFAULT_USER_PREFERENCES, **(preferences or {})}
+    merged = {**DEFAULT_USER_PREFERENCES, **(preferences or {})}
+    # Long-term memory is intentionally deferred. Keep the API honest even for
+    # accounts that stored the old placeholder switches as enabled.
+    merged["long_term_memory_enabled"] = False
+    merged["memory_agent_write_enabled"] = False
+    return merged
 
 
 def _validate_preference_updates(preferences: dict[str, Any]) -> dict[str, Any]:
@@ -364,6 +368,8 @@ def _validate_preference_updates(preferences: dict[str, Any]) -> dict[str, Any]:
 
     validated: dict[str, Any] = {}
     for key, value in preferences.items():
+        if key in {"long_term_memory_enabled", "memory_agent_write_enabled"} and value is True:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="长期记忆尚未启用")
         if key in _BOOLEAN_KEYS:
             if not isinstance(value, bool):
                 raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"{key} 必须为布尔值")

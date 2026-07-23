@@ -10,6 +10,7 @@ from app.api.routes.model_configs import router as model_configs_router
 from app.api.routes.projects import router as projects_router
 from app.api.routes.community import router as community_router
 from app.api.routes.husbandry import router as husbandry_router
+from app.api.routes.knowledge import router as knowledge_router
 from app.api.routes.user_settings import router as user_settings_router
 from app.api.routes.admin import router as admin_router
 from app.core.config import get_settings
@@ -48,6 +49,7 @@ app.include_router(model_configs_router, prefix=settings.api_v1_prefix)
 app.include_router(projects_router, prefix=settings.api_v1_prefix)
 app.include_router(community_router, prefix=settings.api_v1_prefix)
 app.include_router(husbandry_router, prefix=settings.api_v1_prefix)
+app.include_router(knowledge_router, prefix=settings.api_v1_prefix)
 app.include_router(user_settings_router, prefix=settings.api_v1_prefix)
 app.include_router(admin_router, prefix=settings.api_v1_prefix)
 

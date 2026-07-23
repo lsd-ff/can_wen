@@ -30,6 +30,17 @@ def include_object(object_, name: str | None, type_: str, reflected: bool, compa
     if type_ == "table":
         return getattr(object_, "schema", None) == "admin"
     table = getattr(object_, "table", None)
+    # The user-facing migration chain owns the cross-schema foreign keys from
+    # admin.expert_reviews to public business tables.  The admin metadata keeps
+    # those UUID columns deliberately decoupled, so they must not be proposed
+    # for removal by this migration chain.
+    if (
+        type_ == "foreign_key_constraint"
+        and reflected
+        and getattr(table, "schema", None) == "admin"
+        and getattr(table, "name", None) == "expert_reviews"
+    ):
+        return False
     return table is None or getattr(table, "schema", None) == "admin"
 
 

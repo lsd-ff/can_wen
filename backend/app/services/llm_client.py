@@ -32,6 +32,8 @@ def request_openai_compatible_reply(
     messages: list[dict[str, Any]],
     timeout_seconds: float,
     max_tokens: int | None = None,
+    response_format: dict[str, Any] | None = None,
+    temperature: float | None = None,
 ) -> str:
     api_key = model_config.api_key.strip()
     model_id = model_config.model_id.strip()
@@ -49,6 +51,10 @@ def request_openai_compatible_reply(
     }
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    if response_format is not None:
+        payload["response_format"] = response_format
+    if temperature is not None:
+        payload["temperature"] = temperature
 
     request = Request(
         url=_chat_completions_url(api_request_url),

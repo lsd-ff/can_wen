@@ -18,7 +18,6 @@ from sqlalchemy.orm import Session
 from app.core.security import now_utc
 from app.models import (
     Conversation,
-    ExpertReview,
     Farm,
     HusbandryCase,
     HusbandryCaseFollowUp,

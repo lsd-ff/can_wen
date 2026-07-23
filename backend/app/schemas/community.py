@@ -11,7 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 CommunityPostType = Literal["experience", "case", "question", "reference", "announcement"]
 CommunityPostVisibility = Literal["public", "followers"]
 CommunityPostStatus = Literal["draft", "published", "hidden", "deleted"]
-CommunityFeedTab = Literal["recommended", "following", "topics", "latest", "bookmarked", "liked", "history", "mine", "drafts"]
 COMMUNITY_TAG_CONTENT_PATTERN = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]")
 
 
@@ -264,13 +263,6 @@ class CommunitySaveToHusbandryRequest(BaseModel):
     batch_id: UUID | None = None
 
 
-class CommunityReportReviewRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["reviewed", "dismissed"]
-    hide_target: bool = False
-
-
 class CommunityAssetResponse(BaseModel):
     id: str
     file_id: str
@@ -394,19 +386,6 @@ class CommunityNotificationResponse(BaseModel):
 class CommunityNotificationListResponse(BaseModel):
     items: list[CommunityNotificationResponse]
     unread_count: int
-
-
-class CommunityReportResponse(BaseModel):
-    id: str
-    target_type: str
-    post_id: str | None = None
-    comment_id: str | None = None
-    reason: str
-    detail: str | None = None
-    status: str
-    reporter: CommunityAuthorResponse
-    created_at: datetime
-    reviewed_at: datetime | None = None
 
 
 class CommunityProfileDetailResponse(BaseModel):

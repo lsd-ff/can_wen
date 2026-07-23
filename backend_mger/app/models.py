@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -287,8 +287,6 @@ class ExpertReview(Base):
         CheckConstraint("risk_level IN ('low', 'medium', 'high', 'critical')", name="expert_reviews_risk_allowed"),
         Index("idx_expert_reviews_conversation_status", "conversation_id", "status", text("published_at DESC")),
         Index("idx_expert_reviews_case_status", "husbandry_case_id", "status", text("published_at DESC")),
-        Index("idx_expert_reviews_conversation", "conversation_id", "published_at"),
-        Index("idx_expert_reviews_case", "husbandry_case_id", "published_at"),
         Index(
             "uq_expert_reviews_husbandry_case_version",
             "husbandry_case_id",
@@ -350,7 +348,7 @@ class AdminMetricDaily(Base):
 class SystemModelConfig(Base):
     __tablename__ = "system_model_configs"
     __table_args__ = (
-        CheckConstraint("capability IN ('chat', 'vision', 'embedding', 'speech')", name="system_model_configs_capability_allowed"),
+        CheckConstraint("capability IN ('chat', 'vision', 'embedding', 'rerank', 'speech')", name="system_model_configs_capability_allowed"),
         UniqueConstraint("key", name="uq_system_model_configs_key"),
         {"schema": ADMIN_SCHEMA},
     )
@@ -374,6 +372,7 @@ class KnowledgeSource(Base):
     __tablename__ = "knowledge_sources"
     __table_args__ = (
         CheckConstraint("status IN ('draft', 'processing', 'ready', 'failed', 'disabled')", name="knowledge_sources_status_allowed"),
+        Index("idx_knowledge_sources_sha256", "content_sha256"),
         {"schema": ADMIN_SCHEMA},
     )
 
@@ -384,6 +383,11 @@ class KnowledgeSource(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="draft", server_default=text("'draft'"))
     version: Mapped[str] = mapped_column(Text, nullable=False, default="v1", server_default=text("'v1'"))
     license_note: Mapped[str | None] = mapped_column(Text)
+    original_filename: Mapped[str | None] = mapped_column(Text)
+    mime_type: Mapped[str | None] = mapped_column(Text)
+    storage_uri: Mapped[str | None] = mapped_column(Text)
+    content_sha256: Mapped[str | None] = mapped_column(Text)
+    published_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
@@ -408,6 +412,254 @@ class BackgroundJob(Base):
     requested_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeSourceVersion(Base):
+    __tablename__ = "knowledge_source_versions"
+    __table_args__ = (
+        CheckConstraint("status IN ('uploaded', 'parsing', 'parsed', 'failed', 'disabled')", name="knowledge_source_versions_status_allowed"),
+        UniqueConstraint("source_id", "version", name="uq_knowledge_source_versions_source_version"),
+        Index("idx_knowledge_source_versions_source_created", "source_id", text("created_at DESC")),
+        {"schema": ADMIN_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("admin.knowledge_sources.id", ondelete="CASCADE"), nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="uploaded", server_default=text("'uploaded'"))
+    content_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    original_storage_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    markdown_storage_uri: Mapped[str | None] = mapped_column(Text)
+    parser: Mapped[str] = mapped_column(Text, nullable=False, default="markdown", server_default=text("'markdown'"))
+    parser_task_id: Mapped[str | None] = mapped_column(Text)
+    parser_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    heading_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeBuildRun(Base):
+    __tablename__ = "knowledge_build_runs"
+    __table_args__ = (
+        CheckConstraint("status IN ('queued', 'running', 'awaiting_review', 'publishing', 'succeeded', 'failed', 'cancelled')", name="knowledge_build_runs_status_allowed"),
+        Index("idx_knowledge_build_runs_status_created", "status", text("created_at DESC")),
+        Index("idx_knowledge_build_runs_version_created", "source_version_id", text("created_at DESC")),
+        {"schema": ADMIN_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    source_version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("admin.knowledge_source_versions.id", ondelete="CASCADE"), nullable=False)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("admin.background_jobs.id", ondelete="SET NULL"))
+    targets: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="queued", server_default=text("'queued'"))
+    current_node: Mapped[str | None] = mapped_column(Text)
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    graph_thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    config_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    requested_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeChunk(Base):
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        UniqueConstraint("build_run_id", "stable_key", name="uq_knowledge_chunks_run_key"),
+        Index("idx_knowledge_chunks_version_ordinal", "source_version_id", "ordinal"),
+        Index("idx_knowledge_chunks_run_ordinal", "build_run_id", "ordinal"),
+        {"schema": ADMIN_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    source_version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("admin.knowledge_source_versions.id", ondelete="CASCADE"), nullable=False)
+    build_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("admin.knowledge_build_runs.id", ondelete="CASCADE"), nullable=False)
+    stable_key: Mapped[str] = mapped_column(Text, nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_line: Mapped[int | None] = mapped_column(Integer)
+    end_line: Mapped[int | None] = mapped_column(Integer)
+    heading_path: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    heading_level: Mapped[int | None] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=1.0, server_default=text("1.0"))
+    quality_flags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    split_strategy: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeQAItem(Base):
+    __tablename__ = "knowledge_qa_items"
+    __table_args__ = (
+        CheckConstraint("review_status IN ('pending', 'needs_review', 'approved', 'rejected', 'published')", name="knowledge_qa_items_review_status_allowed"),
+        UniqueConstraint("build_run_id", "question_sha256", name="uq_knowledge_qa_items_run_question"),
+        Index("idx_knowledge_qa_items_review_created", "review_status", text("created_at DESC")),
+        Index("idx_knowledge_qa_items_chunk", "chunk_id"),
+        {"schema": ADMIN_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    build_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("admin.knowledge_build_runs.id", ondelete="CASCADE"), nullable=False)
+    chunk_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("admin.knowledge_chunks.id", ondelete="CASCADE"), nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    question_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_text: Mapped[str] = mapped_column(Text, nullable=False)
+    keywords: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    knowledge_types: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    extraction_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default=text("0.0"))
+    rule_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default=text("0.0"))
+    expert_score: Mapped[float | None] = mapped_column(Float)
+    expert_assessment: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    risk_flags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    review_status: Mapped[str] = mapped_column(Text, nullable=False, default="pending", server_default=text("'pending'"))
+    review_note: Mapped[str | None] = mapped_column(Text)
+    reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    qdrant_point_id: Mapped[str | None] = mapped_column(Text)
+    opensearch_document_id: Mapped[str | None] = mapped_column(Text)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeTriple(Base):
+    __tablename__ = "knowledge_triples"
+    __table_args__ = (
+        CheckConstraint("review_status IN ('pending', 'needs_review', 'approved', 'rejected', 'published')", name="knowledge_triples_review_status_allowed"),
+        UniqueConstraint("build_run_id", "triple_key", name="uq_knowledge_triples_run_key"),
+        Index("idx_knowledge_triples_review_created", "review_status", text("created_at DESC")),
+        Index("idx_knowledge_triples_chunk", "chunk_id"),
+        {"schema": ADMIN_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    build_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("admin.knowledge_build_runs.id", ondelete="CASCADE"), nullable=False)
+    chunk_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("admin.knowledge_chunks.id", ondelete="CASCADE"), nullable=False)
+    triple_key: Mapped[str] = mapped_column(Text, nullable=False)
+    subject_name: Mapped[str] = mapped_column(Text, nullable=False)
+    subject_type: Mapped[str] = mapped_column(Text, nullable=False)
+    subject_canonical_name: Mapped[str] = mapped_column(Text, nullable=False)
+    relation: Mapped[str] = mapped_column(Text, nullable=False)
+    object_name: Mapped[str] = mapped_column(Text, nullable=False)
+    object_type: Mapped[str] = mapped_column(Text, nullable=False)
+    object_canonical_name: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_text: Mapped[str] = mapped_column(Text, nullable=False)
+    extraction_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default=text("0.0"))
+    rule_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default=text("0.0"))
+    expert_score: Mapped[float | None] = mapped_column(Float)
+    expert_assessment: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    risk_flags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    resolution_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    review_status: Mapped[str] = mapped_column(Text, nullable=False, default="pending", server_default=text("'pending'"))
+    review_note: Mapped[str | None] = mapped_column(Text)
+    reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    neo4j_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeReviewItem(Base):
+    __tablename__ = "knowledge_review_items"
+    __table_args__ = (
+        CheckConstraint("item_type IN ('chunk', 'qa', 'triple', 'conflict')", name="knowledge_review_items_type_allowed"),
+        CheckConstraint("status IN ('open', 'claimed', 'approved', 'rejected')", name="knowledge_review_items_status_allowed"),
+        CheckConstraint("priority IN ('low', 'medium', 'high', 'critical')", name="knowledge_review_items_priority_allowed"),
+        Index("idx_knowledge_review_items_queue", "status", "priority", text("created_at ASC")),
+        {"schema": ADMIN_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    build_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("admin.knowledge_build_runs.id", ondelete="CASCADE"), nullable=False)
+    item_type: Mapped[str] = mapped_column(Text, nullable=False)
+    resource_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="open", server_default=text("'open'"))
+    priority: Mapped[str] = mapped_column(Text, nullable=False, default="medium", server_default=text("'medium'"))
+    reason_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    model_assessment: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    assignee_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    decision_note: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeBuildEvent(Base):
+    __tablename__ = "knowledge_build_events"
+    __table_args__ = (
+        CheckConstraint("level IN ('debug', 'info', 'warning', 'error')", name="knowledge_build_events_level_allowed"),
+        Index("idx_knowledge_build_events_run_created", "build_run_id", "created_at"),
+        {"schema": ADMIN_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    build_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("admin.knowledge_build_runs.id", ondelete="CASCADE"), nullable=False)
+    node: Mapped[str] = mapped_column(Text, nullable=False)
+    level: Mapped[str] = mapped_column(Text, nullable=False, default="info", server_default=text("'info'"))
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgePublication(Base):
+    __tablename__ = "knowledge_publications"
+    __table_args__ = (
+        CheckConstraint("status IN ('staging', 'published', 'failed', 'rolled_back')", name="knowledge_publications_status_allowed"),
+        UniqueConstraint("build_run_id", name="uq_knowledge_publications_run"),
+        Index("idx_knowledge_publications_status_created", "status", text("created_at DESC")),
+        {"schema": ADMIN_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    build_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("admin.knowledge_build_runs.id", ondelete="CASCADE"), nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="staging", server_default=text("'staging'"))
+    qdrant_collection: Mapped[str | None] = mapped_column(Text)
+    opensearch_index: Mapped[str | None] = mapped_column(Text)
+    neo4j_database: Mapped[str | None] = mapped_column(Text)
+    counts: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    published_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class KnowledgeSyncOutbox(Base):
+    __tablename__ = "knowledge_sync_outbox"
+    __table_args__ = (
+        CheckConstraint("target IN ('qdrant', 'opensearch', 'neo4j')", name="knowledge_sync_outbox_target_allowed"),
+        CheckConstraint("operation IN ('upsert', 'delete')", name="knowledge_sync_outbox_operation_allowed"),
+        CheckConstraint("status IN ('pending', 'processing', 'succeeded', 'failed')", name="knowledge_sync_outbox_status_allowed"),
+        UniqueConstraint("event_key", name="uq_knowledge_sync_outbox_event_key"),
+        Index("idx_knowledge_sync_outbox_pending", "status", "target", "created_at"),
+        {"schema": ADMIN_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    build_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("admin.knowledge_build_runs.id", ondelete="CASCADE"), nullable=False)
+    event_key: Mapped[str] = mapped_column(Text, nullable=False)
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    operation: Mapped[str] = mapped_column(Text, nullable=False, default="upsert", server_default=text("'upsert'"))
+    aggregate_type: Mapped[str] = mapped_column(Text, nullable=False)
+    aggregate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending", server_default=text("'pending'"))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 

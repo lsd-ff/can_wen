@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-canwen123}
       POSTGRES_DB: ${POSTGRES_DB:-can_wen}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-5434}:5432"
     volumes:
       - canw-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -17,5 +17,179 @@ services:
       timeout: 5s
       retries: 15
 
+  redis:
+    image: redis:7.4-alpine
+    container_name: canw-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - canw-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  user-schema-init:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: canw-user-schema-init
+    restart: "no"
+    environment:
+      CAN_WEN_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-canwen}:${POSTGRES_PASSWORD:-canwen123}@postgres:5432/${POSTGRES_DB:-can_wen}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.0
+    container_name: canw-qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - canw-qdrant-data:/qdrant/storage
+
+  opensearch:
+    image: opensearchproject/opensearch:3.7.0
+    container_name: canw-opensearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "${OPENSEARCH_PORT:-9200}:9200"
+    volumes:
+      - canw-opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  admin-api:
+    build:
+      context: .
+      dockerfile: backend_mger/Dockerfile
+    container_name: canw-admin-api
+    restart: unless-stopped
+    env_file:
+      - path: ./backend_mger/.env
+        required: true
+    environment:
+      CANW_ADMIN_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-canwen}:${POSTGRES_PASSWORD:-canwen123}@postgres:5432/${POSTGRES_DB:-can_wen}
+      CANW_ADMIN_CORS_ORIGINS: '["http://127.0.0.1:${ADMIN_WEB_PORT:-5175}","http://localhost:${ADMIN_WEB_PORT:-5175}"]'
+      CANW_ADMIN_USER_API_HEALTH_URL: ""
+      CANW_ADMIN_REDIS_URL: redis://redis:6379/0
+      CANW_ADMIN_CELERY_BROKER_URL: redis://redis:6379/0
+      CANW_ADMIN_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CANW_ADMIN_KNOWLEDGE_STORAGE_ROOT: /data/knowledge
+      CANW_ADMIN_QDRANT_URL: http://qdrant:6333
+      CANW_ADMIN_OPENSEARCH_URL: http://opensearch:9200
+      CANW_ADMIN_AUTO_CREATE_SCHEMA: "false"
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8020"]
+    ports:
+      - "${ADMIN_API_PORT:-8020}:8020"
+    volumes:
+      - canw-knowledge-data:/data/knowledge
+    depends_on:
+      postgres:
+        condition: service_healthy
+      user-schema-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 4s
+      retries: 18
+
+  knowledge-worker:
+    build:
+      context: .
+      dockerfile: backend_mger/Dockerfile
+    container_name: canw-knowledge-worker
+    restart: unless-stopped
+    env_file:
+      - path: ./backend_mger/.env
+        required: true
+    environment:
+      CANW_ADMIN_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-canwen}:${POSTGRES_PASSWORD:-canwen123}@postgres:5432/${POSTGRES_DB:-can_wen}
+      CANW_ADMIN_REDIS_URL: redis://redis:6379/0
+      CANW_ADMIN_CELERY_BROKER_URL: redis://redis:6379/0
+      CANW_ADMIN_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CANW_ADMIN_KNOWLEDGE_STORAGE_ROOT: /data/knowledge
+      CANW_ADMIN_QDRANT_URL: http://qdrant:6333
+      CANW_ADMIN_OPENSEARCH_URL: http://opensearch:9200
+      CANW_ADMIN_AUTO_CREATE_SCHEMA: "false"
+    command: ["celery", "-A", "app.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=${KNOWLEDGE_WORKER_CONCURRENCY:-2}"]
+    volumes:
+      - canw-knowledge-data:/data/knowledge
+    depends_on:
+      admin-api:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      opensearch:
+        condition: service_healthy
+
+  knowledge-seed:
+    profiles: ["seed"]
+    build:
+      context: .
+      dockerfile: backend_mger/Dockerfile
+    env_file:
+      - path: ./backend_mger/.env
+        required: true
+    environment:
+      CANW_ADMIN_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-canwen}:${POSTGRES_PASSWORD:-canwen123}@postgres:5432/${POSTGRES_DB:-can_wen}
+      CANW_ADMIN_KNOWLEDGE_STORAGE_ROOT: /data/knowledge
+      CANW_ADMIN_AUTO_CREATE_SCHEMA: "false"
+    command: ["python", "-m", "scripts.import_initial_knowledge", "--directory", "/seed/knowledge"]
+    volumes:
+      - type: bind
+        source: ${INITIAL_KNOWLEDGE_DIR:-C:/Users/w/Desktop/mrakdown文档/data/05_qa_ready_md}
+        target: /seed/knowledge
+        read_only: true
+      - canw-knowledge-data:/data/knowledge
+    depends_on:
+      admin-api:
+        condition: service_healthy
+
+  admin-web:
+    build:
+      context: .
+      dockerfile: frontend_mger/Dockerfile
+      args:
+        VITE_ADMIN_API_BASE_URL: ${VITE_ADMIN_API_BASE_URL:-http://127.0.0.1:8020/api/admin/v1}
+    container_name: canw-admin-web
+    restart: unless-stopped
+    ports:
+      - "${ADMIN_WEB_PORT:-5175}:80"
+    depends_on:
+      admin-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+
 volumes:
   canw-postgres-data:
+  canw-redis-data:
+  canw-qdrant-data:
+  canw-opensearch-data:
+  canw-knowledge-data:

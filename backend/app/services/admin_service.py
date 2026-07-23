@@ -21,17 +21,12 @@ from app.models import (
     UserIdentity,
 )
 from app.schemas.admin import (
-    AdminContentPostListResponse,
-    AdminContentPostResponse,
-    AdminContentPostUpdateRequest,
     AdminDashboardResponse,
     AdminExpertReviewCreateRequest,
     AdminExpertReviewResponse,
     AdminExpertReviewUpdateRequest,
     AdminMetricResponse,
-    AdminReportListResponse,
     AdminReportResponse,
-    AdminReportReviewRequest,
     AdminReviewQueueItemResponse,
     AdminUserListResponse,
     AdminUserResponse,
@@ -153,102 +148,6 @@ def update_admin_user(
     db.commit()
     db.refresh(target)
     return _user_response(db, target)
-
-
-def list_admin_content_posts(
-    db: Session,
-    *,
-    user: User,
-    query: str | None,
-    content_status: str | None,
-    limit: int,
-    offset: int,
-) -> AdminContentPostListResponse:
-    _ensure_admin(user)
-    statement = select(CommunityPost, User).join(User, User.id == CommunityPost.author_id).order_by(CommunityPost.updated_at.desc())
-    if query and query.strip():
-        keyword = f"%{query.strip()}%"
-        statement = statement.where(or_(CommunityPost.title.ilike(keyword), CommunityPost.content_markdown.ilike(keyword)))
-    if content_status:
-        statement = statement.where(CommunityPost.status == content_status)
-    total = _count(db, select(CommunityPost).where(*statement._where_criteria))
-    rows = db.execute(statement.offset(offset).limit(limit)).all()
-    report_counts = _report_count_map(db, [post.id for post, _ in rows])
-    return AdminContentPostListResponse(
-        items=[_content_post_response(post, author, report_counts.get(post.id, 0)) for post, author in rows],
-        total=total,
-    )
-
-
-def update_admin_content_post(
-    db: Session,
-    *,
-    user: User,
-    post_id: UUID,
-    payload: AdminContentPostUpdateRequest,
-) -> AdminContentPostResponse:
-    _ensure_admin(user)
-    post = db.get(CommunityPost, post_id)
-    if post is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="内容不存在")
-    post.status = payload.status
-    post.updated_at = now_utc()
-    if payload.status == "published" and post.published_at is None:
-        post.published_at = post.updated_at
-    db.add(post)
-    db.commit()
-    db.refresh(post)
-    author = db.get(User, post.author_id)
-    if author is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="内容作者不存在")
-    return _content_post_response(post, author, _report_count_map(db, [post.id]).get(post.id, 0))
-
-
-def list_admin_reports(
-    db: Session,
-    *,
-    user: User,
-    report_status: str,
-    limit: int,
-    offset: int,
-) -> AdminReportListResponse:
-    _ensure_admin(user)
-    statement = select(CommunityReport).where(CommunityReport.status == report_status).order_by(CommunityReport.created_at.desc())
-    total = _count(db, statement)
-    reports = db.scalars(statement.offset(offset).limit(limit)).all()
-    return AdminReportListResponse(items=[_report_response(db, report) for report in reports], total=total)
-
-
-def review_admin_report(
-    db: Session,
-    *,
-    user: User,
-    report_id: UUID,
-    payload: AdminReportReviewRequest,
-) -> AdminReportResponse:
-    _ensure_admin(user)
-    report = db.get(CommunityReport, report_id)
-    if report is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="举报记录不存在")
-    report.status = payload.status
-    report.reviewed_at = now_utc()
-    if payload.hide_target:
-        if report.target_type == "post" and report.post_id:
-            post = db.get(CommunityPost, report.post_id)
-            if post is not None:
-                post.status = "hidden"
-                post.updated_at = report.reviewed_at
-                db.add(post)
-        elif report.comment_id:
-            comment = db.get(CommunityComment, report.comment_id)
-            if comment is not None:
-                comment.status = "hidden"
-                comment.updated_at = report.reviewed_at
-                db.add(comment)
-    db.add(report)
-    db.commit()
-    db.refresh(report)
-    return _report_response(db, report)
 
 
 def list_admin_review_queue(
@@ -380,36 +279,6 @@ def _user_response(db: Session, user: User) -> AdminUserResponse:
         case_count=int(db.scalar(select(func.count()).select_from(HusbandryCase).where(HusbandryCase.owner_id == user.id)) or 0),
         post_count=int(db.scalar(select(func.count()).select_from(CommunityPost).where(CommunityPost.author_id == user.id)) or 0),
     )
-
-
-def _content_post_response(post: CommunityPost, author: User, report_count: int) -> AdminContentPostResponse:
-    return AdminContentPostResponse(
-        id=str(post.id),
-        title=post.title,
-        excerpt=post.excerpt,
-        post_type=post.post_type,
-        status=post.status,
-        visibility=post.visibility,
-        author_name=_display_name(author),
-        author_id=str(author.id),
-        like_count=int(post.like_count),
-        comment_count=int(post.comment_count),
-        view_count=int(post.view_count),
-        report_count=report_count,
-        created_at=post.created_at,
-        published_at=post.published_at,
-    )
-
-
-def _report_count_map(db: Session, post_ids: list[UUID]) -> dict[UUID, int]:
-    if not post_ids:
-        return {}
-    rows = db.execute(
-        select(CommunityReport.post_id, func.count(CommunityReport.id))
-        .where(CommunityReport.post_id.in_(post_ids))
-        .group_by(CommunityReport.post_id)
-    ).all()
-    return {post_id: int(count) for post_id, count in rows if post_id is not None}
 
 
 def _list_report_items(db: Session, *, report_status: str, limit: int) -> list[AdminReportResponse]:

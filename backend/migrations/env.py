@@ -20,6 +20,35 @@ config.set_main_option("sqlalchemy.url", settings.database_url)
 
 target_metadata = Base.metadata
 
+LANGGRAPH_CHECKPOINT_TABLES = {
+    "checkpoint_blobs",
+    "checkpoint_migrations",
+    "checkpoint_writes",
+    "checkpoints",
+}
+
+
+def include_object(object_, name: str | None, type_: str, reflected: bool, compare_to) -> bool:  # type: ignore[no-untyped-def]
+    """Keep the user migration chain inside its ownership boundary.
+
+    The public LangGraph checkpoint tables are runtime-owned, while every
+    admin-schema table except ``expert_reviews`` belongs to the administrator
+    service's independent migration chain.
+    """
+    if type_ == "schema":
+        return name in {None, "public", "admin"}
+    if type_ == "table":
+        schema = getattr(object_, "schema", None)
+        if schema == "admin":
+            return name == "expert_reviews"
+        return schema in {None, "public"} and name not in LANGGRAPH_CHECKPOINT_TABLES
+    table = getattr(object_, "table", None)
+    if table is None:
+        return True
+    if getattr(table, "schema", None) == "admin":
+        return getattr(table, "name", None) == "expert_reviews"
+    return getattr(table, "name", None) not in LANGGRAPH_CHECKPOINT_TABLES
+
 
 def run_migrations_offline() -> None:
     context.configure(
@@ -28,6 +57,8 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_schemas=True,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -46,6 +77,8 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            include_schemas=True,
+            include_object=include_object,
         )
 
         with context.begin_transaction():

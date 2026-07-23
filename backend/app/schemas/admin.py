@@ -10,7 +10,6 @@ AdminUserRole = Literal["farmer", "agritech", "expert", "admin"]
 AdminUserStatus = Literal["active", "disabled", "deleted"]
 AdminReviewStatus = Literal["draft", "published", "superseded"]
 AdminRiskLevel = Literal["low", "medium", "high", "critical"]
-AdminPostStatus = Literal["draft", "published", "hidden", "deleted"]
 
 
 class AdminMetricResponse(BaseModel):
@@ -57,34 +56,6 @@ class AdminUserUpdateRequest(BaseModel):
     status: AdminUserStatus | None = None
 
 
-class AdminContentPostResponse(BaseModel):
-    id: str
-    title: str
-    excerpt: str
-    post_type: str
-    status: AdminPostStatus
-    visibility: str
-    author_name: str
-    author_id: str
-    like_count: int
-    comment_count: int
-    view_count: int
-    report_count: int
-    created_at: datetime
-    published_at: datetime | None = None
-
-
-class AdminContentPostListResponse(BaseModel):
-    items: list[AdminContentPostResponse] = Field(default_factory=list)
-    total: int = 0
-
-
-class AdminContentPostUpdateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["published", "hidden"]
-
-
 class AdminReportResponse(BaseModel):
     id: str
     target_type: Literal["post", "comment"]
@@ -99,18 +70,6 @@ class AdminReportResponse(BaseModel):
     comment_id: str | None = None
     created_at: datetime
     reviewed_at: datetime | None = None
-
-
-class AdminReportListResponse(BaseModel):
-    items: list[AdminReportResponse] = Field(default_factory=list)
-    total: int = 0
-
-
-class AdminReportReviewRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["reviewed", "dismissed"]
-    hide_target: bool = False
 
 
 class AdminReviewQueueItemResponse(BaseModel):

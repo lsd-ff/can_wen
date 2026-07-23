@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
@@ -16,15 +16,6 @@ SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, expi
 def get_db() -> Generator[Session]:
     with SessionLocal() as session:
         yield session
-
-
-def check_database() -> bool:
-    try:
-        with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
-    except Exception:
-        return False
-    return True
 
 
 def close_database() -> None:

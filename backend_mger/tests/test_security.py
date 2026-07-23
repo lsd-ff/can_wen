@@ -12,8 +12,8 @@ from app.security import (
     verify_password,
     verify_totp,
 )
-from app.routes.system import DEFAULT_RISK_RULES, RISK_EVENTS_SQL, RISK_EVENT_SOURCES_SQL, _risk_event_params, _validate_health_settings, _validate_risk_rules
-from app.schemas import AssetLifecycleRequest, RiskIncidentActionRequest
+from app.routes.system import DEFAULT_RISK_RULES, HEALTH_SERVICE_ORDER, RISK_EVENT_SOURCES_SQL, _model_dict, _risk_event_params, _validate_health_settings, _validate_risk_rules
+from app.schemas import AssetLifecycleRequest, ModelConfigRequest, RiskIncidentActionRequest
 from app.services import write_audit
 
 
@@ -61,7 +61,7 @@ def test_audit_payloads_are_json_safe() -> None:
 
 def test_risk_events_exclude_plain_business_todos() -> None:
     """A single ordinary report belongs in business review, not the risk queue."""
-    query = RISK_EVENTS_SQL.lower()
+    query = RISK_EVENT_SOURCES_SQL.lower()
 
     assert "pending_report" not in query
     for event_type in (
@@ -106,9 +106,52 @@ def test_health_settings_validate_probe_and_maintenance_contract() -> None:
             "message": "存储供应商例行升级",
         },
     })
+    assert {"redis", "qdrant", "opensearch", "neo4j"} <= set(HEALTH_SERVICE_ORDER)
 
 
 def test_asset_lifecycle_request_allows_only_reversible_governance_actions() -> None:
     assert AssetLifecycleRequest(action="quarantine", reason="疑似不合规附件，等待核查").action == "quarantine"
     assert AssetLifecycleRequest(action="restore", reason="核查后确认文件正常").action == "restore"
     assert AssetLifecycleRequest(action="delete", reason="重复上传，执行软删除").action == "delete"
+
+
+def test_model_config_can_explicitly_clear_an_independent_key() -> None:
+    payload = ModelConfigRequest(
+        key="qa",
+        label="QA 抽取模型",
+        model_id="qwen-plus",
+        api_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        capability="chat",
+        clear_api_key=True,
+        reason="改用系统统一凭证",
+    )
+
+    assert payload.clear_api_key is True
+    assert payload.api_key is None
+
+
+def test_model_payload_reports_the_real_credential_source(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import app.routes.system as system_routes
+
+    monkeypatch.setattr(system_routes.settings, "dashscope_api_key", "system-key")
+    item = SimpleNamespace(
+        id="model-1",
+        key="qa",
+        label="QA 抽取模型",
+        model_id="qwen-plus",
+        api_base_url="https://example.test/v1",
+        capability="chat",
+        enabled=True,
+        api_key_ciphertext=None,
+        last_test_status="passed",
+        last_test_message="连接成功",
+        last_test_at=None,
+        created_at=None,
+        updated_at=None,
+    )
+
+    assert _model_dict(item)["credential_source"] == "system"
+    item.api_key_ciphertext = "encrypted"
+    assert _model_dict(item)["credential_source"] == "model"

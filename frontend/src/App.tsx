@@ -44,6 +44,7 @@ import type {
 } from './features/community/types';
 import { CommunityConfirmDialog } from './features/community/CommunityConfirmDialog';
 import { DiagnosisMarkdown } from './features/diagnosis/DiagnosisMarkdown';
+import { KnowledgeGraphExplorer } from './features/knowledge/KnowledgeGraphExplorer';
 import {
   formatCaseUpdateStatus,
   formatCommunityIdentity,
@@ -132,7 +133,7 @@ import {
   X,
 } from 'lucide-react';
 
-type ThreadKey = 'diagnosis' | 'video' | 'history' | 'memory' | 'tools' | 'settings' | 'projects' | 'admin';
+type ThreadKey = 'diagnosis' | 'video' | 'history' | 'tools' | 'knowledge' | 'settings' | 'projects';
 type AuthMode = 'phone' | 'email';
 type UiTheme = 'light' | 'dark';
 type UiFontSize = 'small' | 'standard' | 'large' | 'extra';
@@ -411,6 +412,7 @@ type DiagnosisMessage = {
   feedbackReasons?: string[];
   feedbackDetail?: string | null;
   attachments?: DiagnosisMessageAttachment[];
+  agentRun?: ApiDiagnosisAgentRun | null;
 };
 
 type DiagnosisMessageAttachment = {
@@ -430,6 +432,47 @@ type ApiDiagnosisFileResponse = {
   storage_url: string | null;
   file_size: number;
   metadata?: Record<string, unknown>;
+};
+
+type ApiDiagnosisAgentEvent = {
+  run_id: string;
+  sequence: number;
+  agent: string;
+  stage: string;
+  status: 'started' | 'progress' | 'completed' | 'waiting' | 'degraded' | 'failed';
+  title: string;
+  summary: string | null;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
+type ApiDiagnosisCitation = {
+  evidence_id: string;
+  title: string;
+  source_name: string | null;
+  source_uri: string | null;
+  source_version: string | null;
+  source_page: string | null;
+  retrievers: string[];
+  score: number | null;
+  excerpt: string;
+};
+
+type ApiDiagnosisAgentRun = {
+  id: string;
+  status: 'queued' | 'running' | 'waiting_for_user' | 'completed' | 'degraded' | 'failed' | 'cancelled';
+  route: 'rag' | 'kg' | 'hybrid' | 'clarify' | 'out_of_domain' | 'non_knowledge' | null;
+  risk_level: 'low' | 'medium' | 'high' | 'critical' | null;
+  original_question: string;
+  rewritten_question: string | null;
+  evidence_status: 'sufficient' | 'insufficient' | 'conflicted' | 'not_required' | null;
+  missing_slots: string[];
+  metrics: Record<string, unknown>;
+  citations: ApiDiagnosisCitation[];
+  events: ApiDiagnosisAgentEvent[];
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
 };
 
 type DiagnosisSubmitOptions = {
@@ -456,6 +499,7 @@ type ApiDiagnosisMessageResponse = {
   feedback_reasons?: string[];
   feedback_detail?: string | null;
   attachments?: ApiDiagnosisFileResponse[];
+  agent_run?: ApiDiagnosisAgentRun | null;
 };
 
 type ApiDiagnosisConversationResponse = {
@@ -493,6 +537,7 @@ type ApiDiagnosisConversationTurnResponse = {
   assistant_message: ApiDiagnosisMessageResponse;
   model: string;
   provider: string;
+  agent_run?: ApiDiagnosisAgentRun | null;
 };
 
 type ApiDiagnosisMessageMutationResponse = {
@@ -686,8 +731,8 @@ const defaultUiPreferences: UiPreferences = {
 const defaultUserPreferences: UserPreferences = {
   knowledge_graph_enabled: true,
   rag_enabled: true,
-  long_term_memory_enabled: true,
-  memory_agent_write_enabled: true,
+  long_term_memory_enabled: false,
+  memory_agent_write_enabled: false,
   in_app_notifications: true,
   upload_notifications: true,
   model_notifications: true,
@@ -943,8 +988,8 @@ const sidebarActions: SidebarAction[] = [
   { key: 'diagnosis', icon: MessageSquarePlus, label: '新问诊' },
   { key: 'video', icon: MessageCircle, label: '社区' },
   { key: 'history', icon: Search, label: '搜索聊天' },
-  { key: 'memory', icon: GitBranch, label: '图谱探索' },
   { key: 'tools', icon: ClipboardList, label: '养殖工作台' },
+  { key: 'knowledge', icon: GitBranch, label: '图谱探索' },
 ];
 
 const projectColorOptions = [
@@ -1122,6 +1167,7 @@ function mapApiDiagnosisMessage(message: ApiDiagnosisMessageResponse): Diagnosis
     feedbackReasons: message.feedback_reasons ?? [],
     feedbackDetail: message.feedback_detail ?? null,
     attachments: (message.attachments ?? []).map(mapApiDiagnosisAttachment),
+    agentRun: message.agent_run ?? null,
   };
 }
 
@@ -1133,6 +1179,51 @@ function mapApiDiagnosisAttachment(attachment: ApiDiagnosisFileResponse): Diagno
     mimeType: attachment.mime_type,
     storageUrl: attachment.storage_url,
     fileSize: attachment.file_size,
+  };
+}
+
+function mergeDiagnosisAgentEvent(
+  current: ApiDiagnosisAgentRun | null,
+  event: ApiDiagnosisAgentEvent,
+  originalQuestion: string,
+): ApiDiagnosisAgentRun {
+  const routeValue = event.payload.route;
+  const riskValue = event.payload.risk_level;
+  const evidenceStatusValue = event.payload.evidence_status;
+  const rewrittenValue = event.payload.rewritten_question;
+  const route =
+    typeof routeValue === 'string' && ['rag', 'kg', 'hybrid', 'clarify', 'out_of_domain', 'non_knowledge'].includes(routeValue)
+      ? (routeValue as ApiDiagnosisAgentRun['route'])
+      : current?.route ?? null;
+  const riskLevel =
+    typeof riskValue === 'string' && ['low', 'medium', 'high', 'critical'].includes(riskValue)
+      ? (riskValue as ApiDiagnosisAgentRun['risk_level'])
+      : current?.risk_level ?? null;
+  const evidenceStatus =
+    typeof evidenceStatusValue === 'string' && ['sufficient', 'insufficient', 'conflicted', 'not_required'].includes(evidenceStatusValue)
+      ? (evidenceStatusValue as ApiDiagnosisAgentRun['evidence_status'])
+      : current?.evidence_status ?? null;
+  const events = [...(current?.events ?? []).filter((item) => item.sequence !== event.sequence), event].sort(
+    (first, second) => first.sequence - second.sequence,
+  );
+  const isTerminalFailure = event.status === 'failed';
+  const isWaiting = event.status === 'waiting';
+  const isTerminalDegraded = event.agent === 'agent4_evidence_answer' && event.status === 'degraded';
+  return {
+    id: event.run_id,
+    status: isTerminalFailure ? 'failed' : isWaiting ? 'waiting_for_user' : isTerminalDegraded ? 'degraded' : 'running',
+    route,
+    risk_level: riskLevel,
+    original_question: current?.original_question || originalQuestion,
+    rewritten_question: typeof rewrittenValue === 'string' ? rewrittenValue : current?.rewritten_question ?? null,
+    evidence_status: evidenceStatus,
+    missing_slots: current?.missing_slots ?? [],
+    metrics: { ...(current?.metrics ?? {}), latest: event.payload },
+    citations: current?.citations ?? [],
+    events,
+    started_at: current?.started_at ?? event.created_at,
+    completed_at: null,
+    created_at: current?.created_at ?? event.created_at,
   };
 }
 
@@ -1754,6 +1845,7 @@ async function createDiagnosisConversation(
   message: string,
   modelConfigId: string | null,
   projectId: string | null = null,
+  onProcess?: (event: ApiDiagnosisAgentEvent) => void,
 ): Promise<ApiDiagnosisConversationTurnResponse> {
   const payload: { message: string; model_config_id: string | null; project_id?: string } = {
     message,
@@ -1763,11 +1855,11 @@ async function createDiagnosisConversation(
     payload.project_id = projectId;
   }
 
-  return apiRequest<ApiDiagnosisConversationTurnResponse>('/diagnosis/conversations', {
-    method: 'POST',
-    accessToken,
-    payload,
-  });
+  return streamDiagnosisRequest<ApiDiagnosisConversationTurnResponse>(
+    '/diagnosis/conversations/stream',
+    { accessToken, payload },
+    onProcess,
+  );
 }
 
 async function createDiagnosisConversationMessage(
@@ -1775,12 +1867,13 @@ async function createDiagnosisConversationMessage(
   conversationId: string,
   message: string,
   modelConfigId: string | null,
+  onProcess?: (event: ApiDiagnosisAgentEvent) => void,
 ): Promise<ApiDiagnosisConversationTurnResponse> {
-  return apiRequest<ApiDiagnosisConversationTurnResponse>(`/diagnosis/conversations/${conversationId}/messages`, {
-    method: 'POST',
-    accessToken,
-    payload: { message, model_config_id: modelConfigId },
-  });
+  return streamDiagnosisRequest<ApiDiagnosisConversationTurnResponse>(
+    `/diagnosis/conversations/${conversationId}/messages/stream`,
+    { accessToken, payload: { message, model_config_id: modelConfigId } },
+    onProcess,
+  );
 }
 
 async function transcribeDiagnosisAudio(accessToken: string, audio: File): Promise<ApiDiagnosisVoiceTranscriptionResponse> {
@@ -1822,24 +1915,107 @@ function buildDiagnosisMultimodalFormData(payload: DiagnosisMultimodalSubmitPayl
 async function createDiagnosisMultimodalConversation(
   accessToken: string,
   payload: DiagnosisMultimodalSubmitPayload,
+  onProcess?: (event: ApiDiagnosisAgentEvent) => void,
 ): Promise<ApiDiagnosisConversationTurnResponse> {
-  return apiRequest<ApiDiagnosisConversationTurnResponse>('/diagnosis/conversations/multimodal', {
-    method: 'POST',
-    accessToken,
-    formData: buildDiagnosisMultimodalFormData(payload),
-  });
+  return streamDiagnosisRequest<ApiDiagnosisConversationTurnResponse>(
+    '/diagnosis/conversations/multimodal/stream',
+    { accessToken, formData: buildDiagnosisMultimodalFormData(payload) },
+    onProcess,
+  );
 }
 
 async function createDiagnosisMultimodalConversationMessage(
   accessToken: string,
   conversationId: string,
   payload: DiagnosisMultimodalSubmitPayload,
+  onProcess?: (event: ApiDiagnosisAgentEvent) => void,
 ): Promise<ApiDiagnosisConversationTurnResponse> {
-  return apiRequest<ApiDiagnosisConversationTurnResponse>(`/diagnosis/conversations/${conversationId}/messages/multimodal`, {
-    method: 'POST',
-    accessToken,
-    formData: buildDiagnosisMultimodalFormData(payload),
-  });
+  return streamDiagnosisRequest<ApiDiagnosisConversationTurnResponse>(
+    `/diagnosis/conversations/${conversationId}/messages/multimodal/stream`,
+    { accessToken, formData: buildDiagnosisMultimodalFormData(payload) },
+    onProcess,
+  );
+}
+
+async function streamDiagnosisRequest<T>(
+  path: string,
+  options: { accessToken: string; payload?: unknown; formData?: FormData },
+  onProcess?: (event: ApiDiagnosisAgentEvent) => void,
+): Promise<T> {
+  let lastError: Error | null = null;
+  for (const baseUrl of API_BASE_URLS) {
+    let streamOpened = false;
+    try {
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${options.accessToken}`,
+        Accept: 'text/event-stream',
+      };
+      if (options.payload !== undefined) headers['Content-Type'] = 'application/json';
+      const response = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers,
+        body: options.formData ?? (options.payload !== undefined ? JSON.stringify(options.payload) : undefined),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        throw new ApiRequestError(getApiErrorMessage(data, `请求失败：${response.status}`), response.status);
+      }
+      if (!response.body) throw new Error('浏览器不支持智能体实时过程');
+      streamOpened = true;
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finalPayload: T | null = null;
+
+      const consumeFrame = (frame: string) => {
+        const eventName = frame.match(/^event:\s*(.+)$/m)?.[1]?.trim() ?? 'message';
+        const data = frame
+          .split('\n')
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trimStart())
+          .join('\n');
+        if (!data) return;
+        const payload = JSON.parse(data) as unknown;
+        if (eventName === 'process') {
+          onProcess?.(payload as ApiDiagnosisAgentEvent);
+        } else if (eventName === 'final') {
+          finalPayload = payload as T;
+        } else if (eventName === 'error') {
+          const errorPayload = payload as { detail?: string; status?: number };
+          throw new ApiRequestError(errorPayload.detail || '智能体流程执行失败', errorPayload.status ?? 500);
+        }
+      };
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          buffer = buffer.replace(/\r\n/g, '\n');
+          let boundary = buffer.indexOf('\n\n');
+          while (boundary >= 0) {
+            consumeFrame(buffer.slice(0, boundary));
+            buffer = buffer.slice(boundary + 2);
+            boundary = buffer.indexOf('\n\n');
+          }
+        }
+        const tail = `${buffer}${decoder.decode()}`.trim();
+        if (tail) consumeFrame(tail);
+      } finally {
+        reader.releaseLock();
+      }
+      if (finalPayload !== null) return finalPayload;
+      throw new Error('智能体流程结束但未返回最终结果');
+    } catch (error) {
+      if (error instanceof ApiRequestError) throw error;
+      lastError = error instanceof Error ? error : new Error('智能体实时连接失败');
+      // The server may already have created this turn once streaming starts.
+      // Retrying a POST against a second base URL would duplicate the message.
+      if (streamOpened || import.meta.env.VITE_API_BASE_URL) throw lastError;
+    }
+  }
+  throw lastError ?? new Error('智能体实时连接失败');
 }
 
 async function uploadDiagnosisAttachment(accessToken: string, attachment: File): Promise<ApiDiagnosisFileResponse> {
@@ -2440,14 +2616,12 @@ async function regenerateDiagnosisMessage(
   conversationId: string,
   messageId: string,
   modelConfigId: string | null,
+  onProcess?: (event: ApiDiagnosisAgentEvent) => void,
 ): Promise<ApiDiagnosisMessageMutationResponse> {
-  return apiRequest<ApiDiagnosisMessageMutationResponse>(
-    `/diagnosis/conversations/${conversationId}/messages/${messageId}/regenerate`,
-    {
-      method: 'POST',
-      accessToken,
-      payload: { model_config_id: modelConfigId },
-    },
+  return streamDiagnosisRequest<ApiDiagnosisMessageMutationResponse>(
+    `/diagnosis/conversations/${conversationId}/messages/${messageId}/regenerate/stream`,
+    { accessToken, payload: { model_config_id: modelConfigId } },
+    onProcess,
   );
 }
 
@@ -2547,6 +2721,7 @@ function MainApp() {
   const [archivedDiagnosisError, setArchivedDiagnosisError] = useState('');
   const [archiveSavingConversationId, setArchiveSavingConversationId] = useState<string | null>(null);
   const [diagnosisSending, setDiagnosisSending] = useState(false);
+  const [diagnosisLiveRun, setDiagnosisLiveRun] = useState<ApiDiagnosisAgentRun | null>(null);
   const [diagnosisHistoryLoading, setDiagnosisHistoryLoading] = useState(false);
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [projectsError, setProjectsError] = useState('');
@@ -3276,6 +3451,7 @@ function MainApp() {
       setDiagnosisMessages((currentMessages) => [...currentMessages, userMessage]);
     }
     setDiagnosisSending(true);
+    setDiagnosisLiveRun(null);
 
     const modelConfigId = selectedModel?.id ?? null;
     const newConversationProjectId =
@@ -3288,6 +3464,9 @@ function MainApp() {
       : newConversationProjectId
         ? 'project'
         : 'history';
+    const handleAgentProcess = (event: ApiDiagnosisAgentEvent) => {
+      setDiagnosisLiveRun((currentRun) => mergeDiagnosisAgentEvent(currentRun, event, trimmedQuestion || '本轮多模态问诊'));
+    };
     const submitWithToken = (accessToken: string) =>
       attachmentIds.length > 0 || hasStructuredData
         ? targetConversationId
@@ -3296,17 +3475,17 @@ function MainApp() {
               modelConfigId,
               attachmentIds,
               structuredData,
-            })
+            }, handleAgentProcess)
           : createDiagnosisMultimodalConversation(accessToken, {
               message: trimmedQuestion,
               modelConfigId,
               attachmentIds,
               structuredData,
               projectId: newConversationProjectId,
-            })
+            }, handleAgentProcess)
         : targetConversationId
-          ? createDiagnosisConversationMessage(accessToken, targetConversationId, trimmedQuestion, modelConfigId)
-          : createDiagnosisConversation(accessToken, trimmedQuestion, modelConfigId, newConversationProjectId);
+          ? createDiagnosisConversationMessage(accessToken, targetConversationId, trimmedQuestion, modelConfigId, handleAgentProcess)
+          : createDiagnosisConversation(accessToken, trimmedQuestion, modelConfigId, newConversationProjectId, handleAgentProcess);
 
     try {
       const response = await submitWithToken(authState.accessToken);
@@ -3341,13 +3520,14 @@ function MainApp() {
         {
           id: createDiagnosisMessageId(),
           role: 'assistant',
-          content: error instanceof Error ? `模型调用失败：${error.message}` : '模型调用失败，请稍后重试。',
+          content: error instanceof Error ? `智能体流程失败：${error.message}` : '智能体流程失败，请稍后重试。',
           createdAt: getCurrentTimeLabel(),
           status: 'error',
         },
       ]);
     } finally {
       setDiagnosisSending(false);
+      setDiagnosisLiveRun(null);
     }
   };
 
@@ -3391,36 +3571,42 @@ function MainApp() {
               feedbackReasons: [],
               feedbackDetail: null,
             }
-          : message,
+        : message,
       ),
     );
-
-    void (async () => {
-      try {
-        const regenerateResponse = await runAuthenticatedRequest((accessToken) =>
-          regenerateDiagnosisMessage(
-            accessToken,
-            activeDiagnosisConversationId,
-            assistantMessageToRegenerate.id,
-            modelConfigId,
-          ),
-        );
-        updateDiagnosisConversationInPlace(regenerateResponse.conversation);
-        updateDiagnosisMessageInPlace(regenerateResponse.message);
-      } catch (error) {
-        setDiagnosisMessages((currentMessages) =>
-          currentMessages.map((message) =>
-            message.id === assistantMessageToRegenerate.id
-              ? {
-                  ...message,
-                  content: error instanceof Error ? `重新生成失败：${error.message}` : '重新生成失败，请稍后再试。',
-                  status: 'error',
-                }
-              : message,
-          ),
-        );
-      }
-    })();
+    setDiagnosisSending(true);
+    setDiagnosisLiveRun(null);
+    const handleAgentProcess = (event: ApiDiagnosisAgentEvent) => {
+      setDiagnosisLiveRun((currentRun) => mergeDiagnosisAgentEvent(currentRun, event, content));
+    };
+    try {
+      const regenerateResponse = await runAuthenticatedRequest((accessToken) =>
+        regenerateDiagnosisMessage(
+          accessToken,
+          activeDiagnosisConversationId,
+          assistantMessageToRegenerate.id,
+          modelConfigId,
+          handleAgentProcess,
+        ),
+      );
+      updateDiagnosisConversationInPlace(regenerateResponse.conversation);
+      updateDiagnosisMessageInPlace(regenerateResponse.message);
+    } catch (error) {
+      setDiagnosisMessages((currentMessages) =>
+        currentMessages.map((message) =>
+          message.id === assistantMessageToRegenerate.id
+            ? {
+                ...message,
+                content: error instanceof Error ? `重新生成失败：${error.message}` : '重新生成失败，请稍后再试。',
+                status: 'error',
+              }
+            : message,
+        ),
+      );
+    } finally {
+      setDiagnosisSending(false);
+      setDiagnosisLiveRun(null);
+    }
   };
 
   const handleDiagnosisMessageDelete = async (messageId: string) => {
@@ -3455,6 +3641,14 @@ function MainApp() {
 
   const handleDiagnosisMessageRegenerate = async (messageId: string) => {
     if (!activeDiagnosisConversationId || diagnosisSending) return;
+    const messageIndex = diagnosisMessages.findIndex((message) => message.id === messageId);
+    const sourceQuestion =
+      messageIndex > 0
+        ? diagnosisMessages
+            .slice(0, messageIndex)
+            .reverse()
+            .find((message) => message.role === 'user')?.content ?? '本轮问诊'
+        : '本轮问诊';
 
     setDiagnosisMessages((currentMessages) =>
       currentMessages.map((message) =>
@@ -3467,13 +3661,24 @@ function MainApp() {
               feedbackReasons: [],
               feedbackDetail: null,
             }
-          : message,
+        : message,
       ),
     );
+    setDiagnosisSending(true);
+    setDiagnosisLiveRun(null);
+    const handleAgentProcess = (event: ApiDiagnosisAgentEvent) => {
+      setDiagnosisLiveRun((currentRun) => mergeDiagnosisAgentEvent(currentRun, event, sourceQuestion));
+    };
 
     try {
       const response = await runAuthenticatedRequest((accessToken) =>
-        regenerateDiagnosisMessage(accessToken, activeDiagnosisConversationId, messageId, selectedModel?.id ?? null),
+        regenerateDiagnosisMessage(
+          accessToken,
+          activeDiagnosisConversationId,
+          messageId,
+          selectedModel?.id ?? null,
+          handleAgentProcess,
+        ),
       );
       updateDiagnosisConversationInPlace(response.conversation);
       updateDiagnosisMessageInPlace(response.message);
@@ -3490,6 +3695,9 @@ function MainApp() {
         ),
       );
       throw error;
+    } finally {
+      setDiagnosisSending(false);
+      setDiagnosisLiveRun(null);
     }
   };
 
@@ -4220,8 +4428,8 @@ function MainApp() {
 
   const threadTitle = useMemo(() => {
     if (visibleThread === 'video') return '社区：家蚕疾病经验、求助与案例分享';
-    if (visibleThread === 'memory') return '图谱探索：家蚕疾病知识图谱';
     if (visibleThread === 'tools') return '养殖管理：记录、病例与随访';
+    if (visibleThread === 'knowledge') return '图谱探索：家蚕疾病实体、关系与证据';
     if (visibleThread === 'settings') return '设置系统：模型、知识源、记忆、隐私与 UI';
     return '新问诊';
   }, [visibleThread]);
@@ -4359,7 +4567,8 @@ function MainApp() {
           isProjectsView && 'projects-thread-area',
           isDiagnosisStartView && 'diagnosis-start-thread-area',
           visibleThread === 'video' && 'community-thread-area',
-          (visibleThread === 'settings' || visibleThread === 'memory' || visibleThread === 'tools') && 'headerless-thread-area',
+          visibleThread === 'knowledge' && 'knowledge-thread-area',
+          (visibleThread === 'settings' || visibleThread === 'tools' || visibleThread === 'knowledge') && 'headerless-thread-area',
         )}
       >
         {isProjectsView ? (
@@ -4398,6 +4607,7 @@ function MainApp() {
             configuredModels={configuredModels}
             key={activeDiagnosisConversationId ?? `new-${diagnosisSessionId}`}
             isSending={diagnosisSending}
+            liveAgentRun={diagnosisLiveRun}
             messages={diagnosisMessages}
             expertReviews={diagnosisExpertReviews}
             projects={projectRows}
@@ -4433,11 +4643,18 @@ function MainApp() {
             onRequireAuth={() => setAuthModalOpen(true)}
             onTokenRefresh={handleTokenRefresh}
           />
+        ) : visibleThread === 'knowledge' ? (
+          <KnowledgeGraphExplorer
+            authenticated={isAuthenticated}
+            darkMode={uiPreferences.theme === 'dark'}
+            reducedMotion={userPreferences.reduced_motion}
+            request={(path) => runAuthenticatedRequest((accessToken) => apiRequest(path, { accessToken }))}
+            onRequireAuth={() => setAuthModalOpen(true)}
+          />
         ) : (
           <>
-            {visibleThread !== 'settings' && visibleThread !== 'memory' && visibleThread !== 'tools' && <ThreadHeader title={threadTitle} />}
+            {visibleThread !== 'settings' && visibleThread !== 'tools' && <ThreadHeader title={threadTitle} />}
             <div className="thread-scroll">
-              {visibleThread === 'memory' && <MemoryThread />}
               {visibleThread === 'tools' && (
                 <HusbandryThread
                   accessToken={authState?.accessToken ?? ''}
@@ -4498,7 +4715,7 @@ function MainApp() {
                 />
               )}
             </div>
-            {visibleThread !== 'memory' && visibleThread !== 'tools' && <Composer />}
+            {visibleThread !== 'tools' && <Composer />}
           </>
         )}
       </section>
@@ -8845,6 +9062,7 @@ function DiagnosisThread({
   configuredModels,
   expertReviews,
   isSending,
+  liveAgentRun,
   messages,
   projects,
   selectedModelConfigId,
@@ -8872,6 +9090,7 @@ function DiagnosisThread({
   configuredModels: ConfiguredModel[];
   expertReviews: ApiDiagnosisExpertReview[];
   isSending: boolean;
+  liveAgentRun: ApiDiagnosisAgentRun | null;
   messages: DiagnosisMessage[];
   projects: CreatedProject[];
   selectedModelConfigId: string | null;
@@ -8953,11 +9172,11 @@ function DiagnosisThread({
         />
         <div className="diagnosis-chat-scroll" ref={chatScrollRef}>
           <article className="diagnosis-conversation">
-            {userPreferences.show_model_status && <div className="diagnosis-simulated-banner" role="status">
-              <Sparkles size={17} />
+            {userPreferences.show_model_status && <div className="diagnosis-evidence-banner" role="status">
+              <GitBranch size={17} />
               <div>
-                <strong>大模型问诊中</strong>
-                <span>当前由后端调用模型回答；后续 RAG + KG 会接入同一个问诊入口。</span>
+                <strong>证据型智能问诊</strong>
+                <span>问题会经过上下文路由，并按需查询 HNSW、BM25 与知识图谱；证据不足时先追问。</span>
               </div>
             </div>}
             {expertReviews.length > 0 && <DiagnosisExpertReviewPanel reviews={expertReviews} />}
@@ -8988,11 +9207,15 @@ function DiagnosisThread({
                 <div className="diagnosis-message-avatar">
                   <Bot size={17} />
                 </div>
-                <div className="diagnosis-thinking-body">
-                  <span />
-                  <span />
-                  <span />
-                </div>
+                {liveAgentRun ? (
+                  <DiagnosisAgentTracePanel run={liveAgentRun} live />
+                ) : (
+                  <div className="diagnosis-thinking-body" aria-label="正在启动智能体流程">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                )}
               </div>
             )}
           </article>
@@ -10168,6 +10391,7 @@ function DiagnosisMessageBubble({
           </form>
         ) : (
           <>
+            {!isUser && message.agentRun && <DiagnosisAgentTracePanel run={message.agentRun} />}
             {mediaAttachments.length > 0 && (
               <DiagnosisMessageAttachments attachments={mediaAttachments} variant="media" />
             )}
@@ -10181,6 +10405,9 @@ function DiagnosisMessageBubble({
               </div>
             ) : (
               <span className="diagnosis-message-meta-only">{isUser ? '你' : 'CanW 助手'} · {message.createdAt}</span>
+            )}
+            {!isUser && message.agentRun && message.agentRun.citations.length > 0 && (
+              <DiagnosisCitationCards citations={message.agentRun.citations} />
             )}
             <DiagnosisMessageActions
               isUser={isUser}
@@ -10208,6 +10435,221 @@ function DiagnosisMessageBubble({
       )}
     </div>
   );
+}
+
+const diagnosisAgentLabels = {
+  agent1_context_router: { title: '问题理解与路由', icon: GitBranch },
+  agent2_kg: { title: 'KG 图谱检索', icon: Braces },
+  agent3_rag: { title: 'RAG 文档检索', icon: Search },
+  agent4_evidence_answer: { title: '证据治理与回答', icon: ShieldCheck },
+} as const;
+
+function DiagnosisAgentTracePanel({ run, live = false }: { run: ApiDiagnosisAgentRun; live?: boolean }) {
+  const routeLabel = run.route
+    ? {
+        rag: 'RAG',
+        kg: 'KG',
+        hybrid: 'RAG + KG',
+        clarify: '先追问',
+        out_of_domain: '领域外',
+        non_knowledge: '无需检索',
+      }[run.route]
+    : null;
+  const statusLabel = {
+    queued: '等待中',
+    running: '执行中',
+    waiting_for_user: '等待补充',
+    completed: '已完成',
+    degraded: '部分降级',
+    failed: '未完成',
+    cancelled: '已取消',
+  }[run.status];
+  const branchMetrics = collectAgentBranchMetrics(run.events);
+
+  return (
+    <details className={clsx('diagnosis-agent-trace', live && 'is-live')} open={live || undefined}>
+      <summary>
+        <span className={clsx('diagnosis-agent-status-dot', `status-${run.status}`)} aria-hidden="true" />
+        <span className="diagnosis-agent-trace-heading">
+          <strong>{live ? '正在执行诊断轨迹' : '诊断轨迹'}</strong>
+          <small>{statusLabel}</small>
+        </span>
+        {routeLabel && <span className="diagnosis-agent-chip">{routeLabel}</span>}
+        {run.risk_level && <span className={clsx('diagnosis-agent-chip', `risk-${run.risk_level}`)}>风险 {formatAgentRisk(run.risk_level)}</span>}
+        <ChevronDown className="diagnosis-agent-trace-chevron" size={15} aria-hidden="true" />
+      </summary>
+      <div className="diagnosis-agent-trace-body">
+        {run.rewritten_question && run.rewritten_question !== run.original_question && (
+          <div className="diagnosis-agent-rewrite">
+            <span>上下文改写</span>
+            <p>{run.rewritten_question}</p>
+          </div>
+        )}
+        <div className="diagnosis-agent-steps" aria-label="四智能体执行状态">
+          {Object.entries(diagnosisAgentLabels).map(([agentKey, agentMeta], index) => {
+            const agentEvents = run.events.filter((event) => event.agent === agentKey);
+            const lastEvent = agentEvents.at(-1);
+            const skipped = agentEvents.length === 0 && !live;
+            const state = skipped
+              ? 'skipped'
+              : lastEvent?.status === 'completed'
+                ? 'completed'
+                : lastEvent?.status === 'failed' || lastEvent?.status === 'degraded'
+                  ? 'degraded'
+                  : lastEvent?.status === 'waiting'
+                    ? 'waiting'
+                    : agentEvents.length > 0
+                      ? 'active'
+                      : 'pending';
+            const AgentIcon = agentMeta.icon;
+            return (
+              <div className={clsx('diagnosis-agent-step', `state-${state}`)} key={agentKey}>
+                <span className="diagnosis-agent-step-index">{index + 1}</span>
+                <AgentIcon size={15} aria-hidden="true" />
+                <div>
+                  <strong>{agentMeta.title}</strong>
+                  <span>{lastEvent?.summary || lastEvent?.title || (skipped ? '本轮未路由到此智能体' : '等待上一步')}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="diagnosis-agent-branches" aria-label="三路检索摘要">
+          <AgentBranchMetric label="HNSW" detail={branchMetrics.hnsw} icon={Brain} />
+          <AgentBranchMetric label="BM25" detail={branchMetrics.bm25} icon={FileText} />
+          <AgentBranchMetric label="KG" detail={branchMetrics.kg} icon={Database} />
+        </div>
+        <ol className="diagnosis-agent-event-list" aria-label="公开执行事件">
+          {run.events.map((event) => {
+            const meta = formatAgentEventMeta(event.payload);
+            const queryDetails = collectAgentEventQueryDetails(event.payload);
+            return (
+              <li className={clsx(`event-${event.status}`)} key={`${event.run_id}-${event.sequence}`}>
+                <span className="diagnosis-agent-event-marker" aria-hidden="true" />
+                <div>
+                  <div className="diagnosis-agent-event-title">
+                    <strong>{event.title}</strong>
+                    <time>{formatMessageTime(event.created_at)}</time>
+                  </div>
+                  {event.summary && <p>{event.summary}</p>}
+                  {meta && <small>{meta}</small>}
+                  {queryDetails.length > 0 && (
+                    <div className="diagnosis-agent-event-queries" aria-label="本步骤查询词">
+                      {queryDetails.map((query) => <span key={query}>{query}</span>)}
+                    </div>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+        <p className="diagnosis-agent-disclosure">仅展示可审计的步骤、查询调整和数量，不展示系统提示词、向量或模型内部思维。</p>
+      </div>
+    </details>
+  );
+}
+
+function AgentBranchMetric({ label, detail, icon: Icon }: { label: string; detail: string; icon: LucideIcon }) {
+  return (
+    <div className="diagnosis-agent-branch">
+      <Icon size={14} aria-hidden="true" />
+      <span>
+        <strong>{label}</strong>
+        <small>{detail}</small>
+      </span>
+    </div>
+  );
+}
+
+function collectAgentBranchMetrics(events: ApiDiagnosisAgentEvent[]) {
+  const numberFromEvents = (key: string) =>
+    events.reduce((maximum, event) => {
+      const value = event.payload[key];
+      return typeof value === 'number' ? Math.max(maximum, value) : maximum;
+    }, 0);
+  const hasHnsw = events.some((event) => event.agent === 'agent3_rag');
+  const hasBm25 = hasHnsw;
+  const hasKg = events.some((event) => event.agent === 'agent2_kg');
+  return {
+    hnsw: hasHnsw ? `${numberFromEvents('hnsw_hits')} 条命中` : '本轮未启用',
+    bm25: hasBm25 ? `${numberFromEvents('bm25_hits')} 条命中` : '本轮未启用',
+    kg: hasKg ? `${numberFromEvents('path_hits')} 条路径` : '本轮未启用',
+  };
+}
+
+function formatAgentEventMeta(payload: Record<string, unknown>) {
+  const parts: string[] = [];
+  if (typeof payload.round === 'number') parts.push(`第 ${payload.round} 轮`);
+  if (typeof payload.unique_hits === 'number') parts.push(`${payload.unique_hits} 条去重命中`);
+  if (typeof payload.selected_count === 'number') parts.push(`选取 ${payload.selected_count} 条`);
+  if (typeof payload.citation_count === 'number') parts.push(`${payload.citation_count} 个来源`);
+  if (Array.isArray(payload.next_hnsw_queries) || Array.isArray(payload.next_bm25_queries) || Array.isArray(payload.next_terms)) {
+    parts.push('已根据覆盖度改写查询');
+  }
+  return parts.join(' · ');
+}
+
+function collectAgentEventQueryDetails(payload: Record<string, unknown>) {
+  const keys = ['hnsw_queries', 'bm25_queries', 'terms', 'anchors', 'next_hnsw_queries', 'next_bm25_queries', 'next_terms'];
+  const values = keys.flatMap((key) => {
+    const value = payload[key];
+    return Array.isArray(value) ? value : [];
+  });
+  return Array.from(
+    new Set(values.filter((value): value is string => typeof value === 'string').map((value) => value.trim()).filter(Boolean)),
+  ).slice(0, 8);
+}
+
+function formatAgentRisk(value: NonNullable<ApiDiagnosisAgentRun['risk_level']>) {
+  return { low: '低', medium: '中', high: '高', critical: '紧急' }[value];
+}
+
+function DiagnosisCitationCards({ citations }: { citations: ApiDiagnosisCitation[] }) {
+  return (
+    <section className="diagnosis-citations" aria-label="回答来源">
+      <div className="diagnosis-citations-heading">
+        <BookOpen size={15} aria-hidden="true" />
+        <strong>本轮证据来源</strong>
+        <span>{citations.length} 项</span>
+      </div>
+      <div className="diagnosis-citation-list">
+        {citations.map((citation) => {
+          const sourceUri = safeExternalSourceUri(citation.source_uri);
+          const content = (
+            <>
+              <span className="diagnosis-citation-id">{citation.evidence_id}</span>
+              <div>
+                <strong>{citation.title}</strong>
+                <p>{[citation.source_name, citation.source_version, citation.source_page].filter(Boolean).join(' · ') || '知识库来源'}</p>
+                {citation.excerpt && <small>{citation.excerpt}</small>}
+                <div className="diagnosis-citation-channels">
+                  {citation.retrievers.map((retriever) => <span key={retriever}>{retriever.toUpperCase()}</span>)}
+                </div>
+              </div>
+              {sourceUri && <Link2 size={14} aria-hidden="true" />}
+            </>
+          );
+          return sourceUri ? (
+            <a className="diagnosis-citation-card" href={sourceUri} key={citation.evidence_id} rel="noreferrer" target="_blank">
+              {content}
+            </a>
+          ) : (
+            <div className="diagnosis-citation-card" key={citation.evidence_id}>{content}</div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function safeExternalSourceUri(value: string | null) {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value, window.location.origin);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null;
+  } catch {
+    return null;
+  }
 }
 
 function DiagnosisMessageAttachments({
@@ -12964,82 +13406,6 @@ function CommunityReportDialog({ post, onCancel, onSubmit }: { post: ApiCommunit
   return <div className="community-overlay community-confirm-overlay" role="presentation" onMouseDown={onCancel}><section className="community-report-dialog" role="dialog" aria-modal="true" aria-labelledby="community-report-title" onMouseDown={(event) => event.stopPropagation()}><header><div><span>社区治理</span><h2 id="community-report-title">举报帖子</h2></div><button type="button" aria-label="关闭举报窗口" title="关闭" onClick={onCancel}><X size={18} /></button></header><p>“{post.title}” 将提交给社区审核。</p><label><span>举报原因</span><select value={reason} onChange={(event) => setReason(event.target.value)}><option>不准确或不完整</option><option>不当医疗建议</option><option>虚假或误导信息</option><option>隐私或敏感信息</option><option>广告或无关内容</option><option>其他</option></select></label><textarea value={detail} maxLength={1000} onChange={(event) => setDetail(event.target.value)} placeholder="补充说明（可选）" /><footer><button type="button" onClick={onCancel}>取消</button><button className="community-submit-post" type="button" onClick={() => onSubmit(reason, detail)}>提交举报</button></footer></section></div>;
 }
 
-function MemoryThread() {
-  const graphNodes = [
-    { name: '白僵病', type: '疾病', active: true },
-    { name: '体表白粉', type: '症状', active: false },
-    { name: '高湿环境', type: '诱因', active: false },
-    { name: '隔离病蚕', type: '措施', active: false },
-    { name: '蚕座消毒', type: '措施', active: false },
-  ];
-  const relationRows = [
-    ['白僵病', '表现为', '体表白粉'],
-    ['高湿环境', '增加风险', '白僵病'],
-    ['白僵病', '建议处理', '隔离病蚕'],
-    ['蚕座消毒', '用于控制', '病原扩散'],
-  ];
-
-  return (
-    <article className="conversation-card feature-page graph-page">
-      <section className="feature-hero graph-hero">
-        <div>
-          <span className="feature-kicker">Knowledge Graph</span>
-          <h1>家蚕疾病知识图谱</h1>
-          <p>围绕疾病、症状、病原、环境和防治措施建立关系网络，后续可接 Neo4j / RAG 证据来源。</p>
-        </div>
-        <label className="graph-search">
-          <Search size={16} />
-          <input placeholder="搜索疾病、症状或处理措施" />
-        </label>
-      </section>
-
-      <section className="graph-explorer">
-        <div className="graph-canvas" aria-label="知识图谱预览">
-          {graphNodes.map((node, index) => (
-            <button
-              className={clsx('graph-node', node.active && 'active', `node-${index + 1}`)}
-              type="button"
-              key={node.name}
-            >
-              <strong>{node.name}</strong>
-              <span>{node.type}</span>
-            </button>
-          ))}
-          <i className="graph-edge edge-1" />
-          <i className="graph-edge edge-2" />
-          <i className="graph-edge edge-3" />
-          <i className="graph-edge edge-4" />
-        </div>
-        <div className="graph-inspector">
-          <span>当前节点</span>
-          <strong>白僵病</strong>
-          <p>真菌性疾病，常与高湿、通风不足、病原污染有关。可从症状、诱因、处理措施三个方向继续展开。</p>
-          <div className="graph-stats">
-            <div><strong>42</strong><span>关联节点</span></div>
-            <div><strong>16</strong><span>证据片段</span></div>
-            <div><strong>5</strong><span>防治路径</span></div>
-          </div>
-        </div>
-      </section>
-
-      <section className="inline-panel graph-relation-panel">
-        <div className="panel-title">
-          <span>关系路径</span>
-          <small>疾病、症状、诱因、防治措施</small>
-        </div>
-        <div className="graph-relation-list">
-          {relationRows.map(([from, relation, to]) => (
-            <div className="graph-relation-row" key={`${from}-${relation}-${to}`}>
-              <span>{from}</span>
-              <small>{relation}</small>
-              <strong>{to}</strong>
-            </div>
-          ))}
-        </div>
-      </section>
-    </article>
-  );
-}
 
 type HusbandryFormKind = 'farm' | 'batch' | 'daily' | 'case' | 'follow-up' | null;
 type HusbandryDeleteTarget =
@@ -14235,18 +14601,8 @@ function SettingsThread({
       </SettingPanel>
 
       <SettingPanel title="记忆控制" note="长期记忆、写入授权、清除记忆">
-        <ToggleLine
-          label="开启长期记忆"
-          enabled={userPreferences.long_term_memory_enabled}
-          disabled={Boolean(preferenceSavingKey)}
-          onToggle={() => void updatePreference('long_term_memory_enabled', !userPreferences.long_term_memory_enabled)}
-        />
-        <ToggleLine
-          label="允许 Memory Agent 写入"
-          enabled={userPreferences.memory_agent_write_enabled}
-          disabled={Boolean(preferenceSavingKey) || !userPreferences.long_term_memory_enabled}
-          onToggle={() => void updatePreference('memory_agent_write_enabled', !userPreferences.memory_agent_write_enabled)}
-        />
+        <SettingRow label="长期记忆" value="本阶段暂不启用" />
+        <SettingRow label="Memory Agent 写入" value="关闭" />
         <SettingRow label="已写入的长期记忆" value="当前没有可清除内容" />
       </SettingPanel>
 

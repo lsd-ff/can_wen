@@ -728,3 +728,126 @@ class DiagnosisEvidence(Base):
     )
 
     diagnosis: Mapped[Diagnosis] = relationship(back_populates="evidence")
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'waiting_for_user', 'completed', 'degraded', 'failed', 'cancelled')",
+            name="agent_runs_status_allowed",
+        ),
+        CheckConstraint(
+            "route IS NULL OR route IN ('rag', 'kg', 'hybrid', 'clarify', 'out_of_domain', 'non_knowledge')",
+            name="agent_runs_route_allowed",
+        ),
+        CheckConstraint(
+            "risk_level IS NULL OR risk_level IN ('low', 'medium', 'high', 'critical')",
+            name="agent_runs_risk_allowed",
+        ),
+        Index("idx_agent_runs_user_created", "user_id", text("created_at DESC")),
+        Index("idx_agent_runs_conversation_created", "conversation_id", text("created_at DESC")),
+        Index("idx_agent_runs_trigger_message", "trigger_message_id"),
+        {"comment": "问诊智能体运行表：保存四智能体编排状态、知识发布快照和可审计结果。"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    trigger_message_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    assistant_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL")
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="queued", server_default=text("'queued'"))
+    route: Mapped[str | None] = mapped_column(Text)
+    risk_level: Mapped[str | None] = mapped_column(Text)
+    original_question: Mapped[str] = mapped_column(Text, nullable=False)
+    rewritten_question: Mapped[str | None] = mapped_column(Text)
+    context_pack: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    knowledge_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    metrics: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class AgentRunEvent(Base):
+    __tablename__ = "agent_run_events"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('started', 'progress', 'completed', 'waiting', 'degraded', 'failed')",
+            name="agent_run_events_status_allowed",
+        ),
+        UniqueConstraint("agent_run_id", "sequence", name="uq_agent_run_events_run_sequence"),
+        Index("idx_agent_run_events_run_sequence", "agent_run_id", "sequence"),
+        {"comment": "问诊智能体公开过程事件：支持前端实时展示、刷新回放和断线续传。"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    agent_run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    agent_key: Mapped[str] = mapped_column(Text, nullable=False)
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    public_title: Mapped[str] = mapped_column(Text, nullable=False)
+    public_summary: Mapped[str | None] = mapped_column(Text)
+    public_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    internal_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class AgentEvidence(Base):
+    __tablename__ = "agent_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "evidence_type IN ('rag_document', 'kg_path', 'multimodal_observation', 'user_context')",
+            name="agent_evidence_type_allowed",
+        ),
+        UniqueConstraint("agent_run_id", "evidence_key", name="uq_agent_evidence_run_key"),
+        Index("idx_agent_evidence_run_rank", "agent_run_id", "rank_order"),
+        {"comment": "问诊智能体统一证据表：保存最终采用的 RAG、KG 与现场观察证据。"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    agent_run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    evidence_key: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_type: Mapped[str] = mapped_column(Text, nullable=False)
+    retriever: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source_name: Mapped[str | None] = mapped_column(Text)
+    source_uri: Mapped[str | None] = mapped_column(Text)
+    source_version: Mapped[str | None] = mapped_column(Text)
+    source_page: Mapped[str | None] = mapped_column(Text)
+    score: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
+    rank_order: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))

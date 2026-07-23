@@ -72,7 +72,7 @@ def _build_user_filters(
             """
         )
     elif attention == "security":
-        filters.append(f"(SELECT count(*) FROM login_events login_failure WHERE login_failure.created_at >= now() - interval '7 days' AND login_failure.event_type IN ('login_failed', 'verification_failed') AND (login_failure.user_id = u.id OR EXISTS (SELECT 1 FROM user_identities login_identity WHERE login_identity.user_id = u.id AND login_identity.unbound_at IS NULL AND (login_identity.email = login_failure.target OR login_identity.phone_number = login_failure.target)))) >= 3")
+        filters.append("(SELECT count(*) FROM login_events login_failure WHERE login_failure.created_at >= now() - interval '7 days' AND login_failure.event_type IN ('login_failed', 'verification_failed') AND (login_failure.user_id = u.id OR EXISTS (SELECT 1 FROM user_identities login_identity WHERE login_identity.user_id = u.id AND login_identity.unbound_at IS NULL AND (login_identity.email = login_failure.target OR login_identity.phone_number = login_failure.target)))) >= 3")
     elif attention == "verification":
         filters.append("COALESCE(cp.verification_status, 'unverified') = 'pending'")
 
